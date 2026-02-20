@@ -1,4 +1,4 @@
-const { hasMinLen, looksLikePhone10MX, normalizeMX10ToE164, hasMediaUrls } = require("../../../utils/validators");
+const { hasMinLen, looksLikePhone10MX, normalizeMX10ToE164, hasMediaUrls } = require("../../utils/validators");
 const { findColoniaMatch } = require("../../services/coverageService");
 const { createContract } = require("../../services/contractsService");
 const { notifyAdmin } = require("../../services/notifyService");

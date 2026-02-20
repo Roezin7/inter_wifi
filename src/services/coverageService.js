@@ -1,5 +1,5 @@
 const { query } = require("../db");
-const { norm } = require("../../utils/textUtils");
+const { norm } = require("../utils/textUtils");
 
 /**
  * Fuzzy simple:

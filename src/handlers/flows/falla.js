@@ -1,4 +1,4 @@
-const { hasMinLen } = require("../../../utils/validators");
+const { hasMinLen } = require("../../utils/validators");
 const { createReport } = require("../../services/reportsService");
 const { notifyAdmin } = require("../../services/notifyService");
 

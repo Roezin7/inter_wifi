@@ -1,5 +1,5 @@
 const { query } = require("../db");
-const { norm } = require("../../utils/textUtils");
+const { norm } = require("../utils/textUtils");
 
 async function getFaqCandidates() {
   const r = await query(`select id, question, answer, question_norm from faqs order by id asc`, []);

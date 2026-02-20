@@ -1,5 +1,5 @@
-const { hasMinLen, hasMediaUrls } = require("../../../utils/validators");
-const { extractFirstNumber } = require("../../../utils/textUtils");
+const { hasMinLen, hasMediaUrls } = require("../../utils/validators");
+const { extractFirstNumber } = require("../../utils/textUtils");
 const { createPayment } = require("../../services/paymentsService");
 const { notifyAdmin } = require("../../services/notifyService");
 const { parsePaymentMesMonto } = require("../../services/llmService");

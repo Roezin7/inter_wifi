@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { Pool } = require("pg");
-const { logger } = require("../../utils/logger");
+const { logger } = require("../utils/logger");
 
 function mustEnv(name) {
   const v = process.env[name];
