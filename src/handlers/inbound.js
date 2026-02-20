@@ -50,13 +50,14 @@ function mapNumberToIntent(text) {
 async function handleInbound({ inbound, send }) {
   // 1) Log inbound siempre
   await insertWaMessage({
-    sessionId: null,
-    phoneE164: inbound.phoneE164,
-    direction: "IN",
-    body: inbound.text || "",
-    media: inbound.media,
-    raw: inbound.raw
-  });
+  sessionId: null,
+  phoneE164: inbound.phoneE164,
+  direction: "IN",
+  body: inbound.text || "",
+  media: inbound.media,
+  raw: inbound.raw,
+  providerMsgId: inbound.providerMsgId || null
+});
 
   // 2) Buscar sesión abierta
   const existing = await getOpenSessionByPhone(inbound.phoneE164);
@@ -79,12 +80,13 @@ try {
 await send(polished);
 
     await insertWaMessage({
-      sessionId: sessionId || null,
-      phoneE164: inbound.phoneE164,
-      direction: "OUT",
-      body: polished,
-      raw: { kind, flow, step }
-    });
+  sessionId: sessionId || null,
+  phoneE164: inbound.phoneE164,
+  direction: "OUT",
+  body: polished,
+  raw: { kind, flow, step },
+  providerMsgId: null
+});
 
     return polished;
   }

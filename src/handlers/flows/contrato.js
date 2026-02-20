@@ -11,44 +11,51 @@ const { createContract } = require("../../services/contractsService");
 const { notifyAdmin } = require("../../services/notifyService");
 const { extractColoniaHint, parsePhoneE164 } = require("../../services/llmService");
 
-// (Opcional) si ya creaste replies.js, úsalo para variar.
-// Si no existe aún, comenta estas 2 líneas y usa strings fijos.
+// Variación opcional
 let templates, pick;
 try {
   ({ templates, pick } = require("../../utils/replies"));
 } catch {}
 
-/** Heurística: NO intentes “adivinar colonia” con IA si no parece dirección */
-function looksLikeAddress(t) {
-  const s = String(t || "").trim();
-  if (s.length < 4) return false;
+/** Heurística: evita IA si NO parece dirección */
+function looksLikeAddress(text) {
+  const s = String(text || "").trim();
+  if (s.length < 3) return false;
+
   const hasNumber = /\d/.test(s);
-  const words = s.split(/\s+/).filter(Boolean);
-  const hasTwoWords = words.length >= 2;
+  const hasComma = s.includes(",");
   const hasColWord = /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
-  // "Hidalgo" solo: NO
-  if (!hasTwoWords && !hasNumber) return false;
-  return hasColWord || hasNumber || (hasTwoWords && s.length > 10);
+  const words = s.split(/\s+/).filter(Boolean);
+
+  // "Hidalgo" (1 palabra sin número) => NO
+  if (words.length === 1 && !hasNumber) return false;
+
+  // Si trae coma o número o palabra colonia => sí parece dirección
+  if (hasComma || hasNumber || hasColWord) return true;
+
+  // Si trae 2+ palabras, pero muy corto, igual no
+  if (words.length >= 2 && s.length >= 10) return true;
+
+  return false;
 }
 
-/** Mensajes base (humanos) */
-function intro(phoneE164) {
-  if (templates && pick) return pick(templates.contrato_intro, phoneE164)();
+function intro(seed) {
+  if (templates && pick) return pick(templates.contrato_intro, seed)();
   return (
-    "Perfecto 🙌 Para revisar cobertura necesito tu *colonia* y tu *calle con número*.\n" +
-    "Ejemplo: “Centro, Hidalgo 311”.\n\n" +
-    "¿En qué colonia estás?"
+    "Va, te ayudo con la contratación 🙌\n" +
+    "Para revisar cobertura, ¿me compartes *colonia* y *calle con número*?\n" +
+    "Ejemplo: “Morelos, Hidalgo 123”."
   );
 }
 
-function askColoniaMoreDetail(phoneE164) {
-  if (templates && pick) return pick(templates.ask_colonia_more_detail, phoneE164)();
-  return "Gracias. ¿Me dices la *colonia* también? Con colonia + calle + número lo reviso rápido.";
+function askColoniaMoreDetail(seed) {
+  if (templates && pick) return pick(templates.ask_colonia_more_detail, seed)();
+  return "Gracias. ¿En qué *colonia* queda esa calle? Con *colonia + calle + número* te confirmo rápido 🙂";
 }
 
-function confirmColonia(col, phoneE164) {
-  if (templates && pick) return pick(templates.confirm_colonia, phoneE164)(col);
-  return `Perfecto, entonces estás en *${col}*. ¿Correcto?`;
+function confirmColonia(col, seed) {
+  if (templates && pick) return pick(templates.confirm_colonia, seed)(col);
+  return `Perfecto, entonces es *${col}*. ¿Correcto?`;
 }
 
 async function handle({ session, inbound, send, updateSession, closeSession }) {
@@ -56,89 +63,94 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   const data = session.data || {};
   const phoneE164 = session.phone_e164 || inbound.phoneE164;
 
-  // STEP 1: dirección/colonia
+  // STEP 1: captura dirección/colonia
   if (step === 1) {
     const txt = String(inbound.text || "").trim();
 
-    // Saludos / mensajes muy cortos / solo calle sin número:
+    // Mensajes vacíos/saludos
     if (!hasMinLen(txt, 3)) {
       await send(intro(phoneE164));
       return;
     }
 
-    // Si no parece dirección, no uses LLM: pregunta colonia
+    // Si no parece dirección, pide colonia (sin IA)
     if (!looksLikeAddress(txt)) {
       await send(askColoniaMoreDetail(phoneE164));
       return;
     }
 
-    // Intenta extraer colonia con LLM (pero ya no rompe si viene null)
-    let hint = null;
-    try {
-      hint = await extractColoniaHint(txt);
-    } catch {
-      hint = null;
+    // Extraer colonia con LLM (SIN romper si falla)
+    let queryText = txt;
+    if (txt.length >= 8) {
+      try {
+        const hint = await extractColoniaHint(txt);
+        const guess = String(hint?.colonia_norm_guess || "").trim();
+        if (guess) queryText = guess;
+      } catch {
+        // no pasa nada
+      }
     }
-
-    const queryText = (hint && hint.colonia_norm_guess) ? hint.colonia_norm_guess : txt;
 
     const match = await findColoniaMatch(queryText);
 
-    if (!match || !match.found || !match.match) {
+    if (!match?.found || !match?.match?.colonia) {
       await send(
-        "No alcancé a identificar bien la colonia 😅\n" +
-        "¿Me la puedes escribir tal cual? Ej: *Centro*, *Las Flores*, *Los Altos Residencial*…"
+        "Te sigo 🙂 ¿me lo mandas así: *Colonia, Calle y Número*?\n" +
+        "Ejemplo: “Morelos, Hidalgo 123”."
       );
       return;
     }
 
-    // Guardamos match
     const nextData = {
       ...data,
       colonia_input: txt,
       colonia: match.match.colonia,
+      colonia_norm: match.match.colonia_norm || null,
       cobertura: match.match.cobertura,
       zona: match.match.zona || null,
-      // bandera para confirmar colonia una vez
       colonia_confirmed: false
     };
 
-    // Confirmación humana primero
+    // Confirmación humana
     await updateSession({ step: 10, data: nextData });
-    await send(confirmColonia(match.match.colonia, phoneE164));
+    await send(confirmColonia(nextData.colonia, phoneE164));
     return;
   }
 
-  // STEP 10: confirmación de colonia (sí/no)
+  // STEP 10: confirmar colonia (sí/no)
   if (step === 10) {
     const t = String(inbound.text || "").trim().toLowerCase();
 
-    if (/(si|sí|correcto|asi es|exacto|ok|va|confirmo)/i.test(t)) {
+    const isYes = /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(t);
+    const isNo  = /(no|nel|incorrecto|equivocado|error)/i.test(t);
+
+    if (isYes) {
       const confirmedData = { ...data, colonia_confirmed: true };
 
-      // si NO hay cobertura
+      // sin cobertura
       if (String(confirmedData.cobertura || "").toUpperCase() === "NO") {
         await updateSession({ step: 99, data: confirmedData });
         await send(
           `Gracias. Por ahora *no tenemos cobertura* en *${confirmedData.colonia}*.\n` +
-          "Si gustas, dime tu *nombre* y un *teléfono de contacto* y te avisamos cuando llegue 🙏"
+          "Si gustas, dime tu *nombre* y un *teléfono* y te avisamos cuando llegue 🙏"
         );
         return;
       }
 
       await updateSession({ step: 2, data: confirmedData });
-      await send("Excelente ✅ ¿Cuál es tu *nombre completo*?");
+      await send("Excelente 🙌 ¿Cuál es tu *nombre completo*?");
       return;
     }
 
-    if (/(no|nel|incorrecto|equivocado)/i.test(t)) {
+    if (isNo) {
       await updateSession({ step: 1, data: { ...data, colonia_confirmed: false } });
-      await send("Va, corrígeme por favor 🙂 ¿Cuál es tu *colonia* y tu *calle con número*?");
+      await send("Va, corrígeme 🙂 ¿Cuál es tu *colonia* y tu *calle con número*? (Ej: Morelos, Hidalgo 123)");
       return;
     }
 
-    // Si responde otra cosa, seguimos pidiendo confirmación clara
-    await send("¿Me confirmas si esa colonia es correcta? Responde *sí* o *no* 🙂");
+    // Si mandan otra dirección (no dicen sí/no), regresamos a step 1 pero sin loop agresivo
+    await updateSession({ step: 1, data: { ...data, colonia_confirmed: false } });
+    await send("Perfecto. Pásame por favor *colonia, calle y número* (Ej: Morelos, Hidalgo 123).");
     return;
   }
 
@@ -157,21 +169,16 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   // STEP 3: teléfono
   if (step === 3) {
     const raw = String(inbound.text || "").trim();
-    const t = raw.toLowerCase();
+    const lower = raw.toLowerCase();
 
     let tel = null;
 
-    // 1) “mismo”
-    if (t.includes("mismo")) {
-      tel = phoneE164;
-    }
+    if (lower.includes("mismo")) tel = phoneE164;
 
-    // 2) 10 dígitos MX
     if (!tel && looksLikePhone10MX(raw)) {
       tel = normalizeMX10ToE164(raw);
     }
 
-    // 3) LLM fallback (si lo tienes activo)
     if (!tel) {
       try {
         const parsed = await parsePhoneE164(raw, phoneE164);
@@ -237,7 +244,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     await send(
       `Listo ✅ Ya quedó tu solicitud.\n` +
       `Folio: *${c.folio}*\n\n` +
-      "En breve te contactamos para confirmar la instalación. 🙌"
+      "En breve te contactamos para confirmar la instalación 🙌"
     );
     return;
   }
@@ -254,7 +261,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
-  // fallback
   await closeSession(session.session_id);
   await send("Listo ✅ Si necesitas algo más, aquí estoy.");
 }
