@@ -2,10 +2,6 @@
 const { query } = require("../db");
 const { norm } = require("../utils/textUtils");
 
-/**
- * Devuelve candidatos (máx limit) ordenados por similitud.
- * Cada candidato trae: { name_display, name_norm, cobertura, zona, sim }
- */
 async function findColoniaCandidates(userText, limit = 5) {
   const t = norm(userText || "");
   if (!t) return [];
@@ -14,9 +10,6 @@ async function findColoniaCandidates(userText, limit = 5) {
     `
     SELECT
       name_display,
-      name_norm,
-      cobertura,
-      zona,
       similarity(name_norm, $1) AS sim
     FROM coverage_colonias_v2
     WHERE active = true
@@ -31,9 +24,9 @@ async function findColoniaCandidates(userText, limit = 5) {
 }
 
 /**
- * Decide si es "auto-accept" o requiere confirmación.
- * - autoAccept si sim >= 0.65 y (gap >= 0.08 vs #2 o solo hay 1)
- * Ajusta thresholds a tu data real.
+ * Resuelve colonia:
+ * - autoAccept si similarity alta y gap contra 2do candidato
+ * - si no, devuelve candidatos para confirmar
  */
 async function resolveColonia(userText, { limit = 5 } = {}) {
   const candidates = await findColoniaCandidates(userText, limit);
@@ -49,21 +42,15 @@ async function resolveColonia(userText, { limit = 5 } = {}) {
   const sim2 = Number(second?.sim || 0);
   const gap = sim1 - sim2;
 
-  const autoAccept = sim1 >= 0.65 && (candidates.length === 1 || gap >= 0.08);
+  // ajusta thresholds si quieres más/menos agresivo
+  const autoAccept = sim1 >= 0.70 && (candidates.length === 1 || gap >= 0.08);
 
   return {
     ok: true,
     autoAccept,
-    best: {
-      colonia: best.name_display,
-      cobertura: best.cobertura,
-      zona: best.zona || null,
-      sim: sim1
-    },
+    best: { colonia: best.name_display, sim: sim1 },
     candidates: candidates.map((c) => ({
       colonia: c.name_display,
-      cobertura: c.cobertura,
-      zona: c.zona || null,
       sim: Number(c.sim || 0)
     }))
   };

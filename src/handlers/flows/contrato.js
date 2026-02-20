@@ -6,62 +6,47 @@ const {
   hasMediaUrls
 } = require("../../utils/validators");
 
-const { resolveColonia } = require("../../services/coverageService");
 const { createContract } = require("../../services/contractsService");
 const { notifyAdmin } = require("../../services/notifyService");
-const { parsePhoneE164 } = require("../../services/llmService"); // solo para teléfono
+const { parsePhoneE164 } = require("../../services/llmService");
+const { resolveColonia } = require("../../services/coverageService");
 
+// Variación opcional
 let templates, pick;
 try {
   ({ templates, pick } = require("../../utils/replies"));
 } catch {}
 
+function looksLikeAddress(text) {
+  const s = String(text || "").trim();
+  if (s.length < 3) return false;
+  const hasNumber = /\d/.test(s);
+  const hasComma = s.includes(",");
+  const hasColWord = /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
+  const words = s.split(/\s+/).filter(Boolean);
+  if (words.length === 1 && !hasNumber) return false;
+  if (hasComma || hasNumber || hasColWord) return true;
+  if (words.length >= 2 && s.length >= 10) return true;
+  return false;
+}
+
 function intro(seed) {
   if (templates && pick) return pick(templates.contrato_intro, seed)();
   return (
     "Va, te ayudo con la contratación 🙌\n" +
-    "Para revisar cobertura, mándame tu *colonia*.\n" +
-    "Si ya tienes: *colonia, calle y número* mejor (Ej: “Centro, Hidalgo 311”)."
+    "Para revisar cobertura, ¿me compartes *colonia* y *calle con número*?\n" +
+    "Ejemplo: “Centro, Hidalgo 311”."
   );
 }
 
-function askColonia() {
-  return "¿En qué *colonia* estás? (Ej: Centro / Las Américas)";
+function askColonia(seed) {
+  if (templates && pick) return pick(templates.ask_colonia_more_detail, seed)();
+  return "Gracias. ¿Me dices la *colonia*? (Ej: Centro, Las Américas, Morelos)";
 }
 
-function askCalleNumero() {
-  return "Perfecto ✅ Ahora pásame tu *calle y número* (Ej: “Hidalgo 311”).";
-}
-
-function askPickColonia(cands) {
-  const lines = cands
-    .slice(0, 5)
-    .map((c, i) => `${i + 1}) ${c.colonia}`)
-    .join("\n");
-  return (
-    "¿Cuál de estas colonias es?\n" +
-    lines +
-    "\n\nRespóndeme con el número (1, 2, 3...)"
-  );
-}
-
-function trySplitAddress(text) {
-  const t = String(text || "").trim();
-
-  // Caso: "Centro, Hidalgo 311"
-  if (t.includes(",")) {
-    const [a, b] = t.split(",").map((x) => x.trim());
-    const coloniaPart = a || "";
-    const rest = b || "";
-    const hasNum = /\d/.test(rest);
-    return {
-      coloniaPart,
-      calleNumero: hasNum ? rest : ""
-    };
-  }
-
-  // Si no hay coma, no adivinamos colonia aquí
-  return { coloniaPart: "", calleNumero: "" };
+function confirmColonia(col, seed) {
+  if (templates && pick) return pick(templates.confirm_colonia, seed)(col);
+  return `¿Te refieres a la colonia *${col}*? Responde *sí* o *no* 🙂`;
 }
 
 async function handle({ session, inbound, send, updateSession, closeSession }) {
@@ -70,138 +55,87 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   const phoneE164 = session.phone_e164 || inbound.phoneE164;
   const txt = String(inbound.text || "").trim();
 
-  // STEP 1: colonia o colonia+calle
+  // STEP 1: resolver colonia (DB-first)
   if (step === 1) {
     if (!hasMinLen(txt, 2)) {
       await send(intro(phoneE164));
       return;
     }
 
-    // Intento split si viene con coma
-    const { coloniaPart, calleNumero } = trySplitAddress(txt);
+    // Si viene dirección completa, intentamos resolver colonia con IA (opcional)
+    // pero tu pedido fue DB-first: así que SOLO DB usando el texto recibido.
+    const res = await resolveColonia(txt, { limit: 5 });
 
-    // 1A) Si viene colonia explícita (por coma)
-    if (coloniaPart) {
-      const r = await resolveColonia(coloniaPart);
-
-      if (!r.ok) {
-        await send(
-          "No ubiqué esa colonia 😅\n" +
-          "¿Me la escribes tal cual aparece? (Ej: Las Américas)"
-        );
+    if (!res.ok) {
+      // si mandó "Hidalgo 311" sin colonia, pide colonia
+      if (looksLikeAddress(txt) && !/(col\.?|colonia|centro|morelos|americ)/i.test(txt)) {
+        await send("¿En qué *colonia* queda esa calle? (Ej: Centro)");
         return;
       }
-
-      if (r.autoAccept) {
-        const next = {
-          ...data,
-          colonia_input: coloniaPart,
-          colonia: r.best.colonia,
-          cobertura: r.best.cobertura,
-          zona: r.best.zona,
-          colonia_confirmed: true
-        };
-
-        // Si además ya venía calle+número en el mismo mensaje
-        if (calleNumero) {
-          await updateSession({ step: 2, data: { ...next, calle_numero: calleNumero } });
-          await send("Excelente ✅ ¿Cuál es tu *nombre completo*?");
-          return;
-        }
-
-        await updateSession({ step: 11, data: next });
-        await send(`Perfecto ✅ Estás en *${next.colonia}*.\n${askCalleNumero()}`);
-        return;
-      }
-
-      // no autoAccept => shortlist
-      await updateSession({
-        step: 12,
-        data: {
-          ...data,
-          colonia_input: coloniaPart,
-          colonia_candidates: r.candidates.slice(0, 5)
-        }
-      });
-      await send(askPickColonia(r.candidates));
+      await send(askColonia(phoneE164));
       return;
     }
 
-    // 1B) Si mandó “Las Américas” o “Centro” (sin coma)
-    const r = await resolveColonia(txt);
-
-    if (!r.ok) {
-      await send("¿En qué *colonia* estás? (Ej: Centro / Las Américas)");
-      return;
-    }
-
-    if (r.autoAccept) {
-      const next = {
+    // si es suficientemente claro, aceptamos y pedimos calle+número
+    if (res.autoAccept) {
+      const nextData = {
         ...data,
         colonia_input: txt,
-        colonia: r.best.colonia,
-        cobertura: r.best.cobertura,
-        zona: r.best.zona,
+        colonia: res.best.colonia,
         colonia_confirmed: true
       };
-      await updateSession({ step: 11, data: next });
-      await send(`Perfecto ✅ Estás en *${next.colonia}*.\n${askCalleNumero()}`);
+      await updateSession({ step: 11, data: nextData });
+      await send(`Perfecto ✅ Colonia *${nextData.colonia}*.\n¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)`);
       return;
     }
 
-    // shortlist
-    await updateSession({
-      step: 12,
-      data: { ...data, colonia_input: txt, colonia_candidates: r.candidates.slice(0, 5) }
-    });
-    await send(askPickColonia(r.candidates));
-    return;
-  }
-
-  // STEP 12: elegir colonia por número
-  if (step === 12) {
-    const n = Number(String(txt).trim());
-    const cands = Array.isArray(data.colonia_candidates) ? data.colonia_candidates : [];
-
-    if (!Number.isFinite(n) || n < 1 || n > cands.length) {
-      await send("Respóndeme con el número 🙂 (1, 2, 3...)");
-      return;
-    }
-
-    const picked = cands[n - 1];
-
-    const next = {
+    // si hay duda, pedimos confirmación con el mejor match
+    const nextData = {
       ...data,
-      colonia: picked.colonia,
-      cobertura: picked.cobertura,
-      zona: picked.zona || null,
-      colonia_confirmed: true,
-      colonia_candidates: [] // limpia
+      colonia_input: txt,
+      colonia_guess: res.best.colonia,
+      colonia_candidates: res.candidates
     };
-
-    await updateSession({ step: 11, data: next });
-    await send(`Listo ✅ Colonia *${next.colonia}*.\n${askCalleNumero()}`);
+    await updateSession({ step: 10, data: nextData });
+    await send(confirmColonia(res.best.colonia, phoneE164));
     return;
   }
 
-  // STEP 11: ya hay colonia, pedir calle + número
+  // STEP 10: confirmar colonia
+  if (step === 10) {
+    const t = txt.toLowerCase();
+    const isYes = /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(t);
+    const isNo  = /(no|nel|incorrecto|equivocado|error)/i.test(t);
+
+    if (isYes) {
+      const nextData = {
+        ...data,
+        colonia: data.colonia_guess,
+        colonia_confirmed: true
+      };
+      await updateSession({ step: 11, data: nextData });
+      await send(`Listo ✅ Colonia *${nextData.colonia}*.\n¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)`);
+      return;
+    }
+
+    if (isNo) {
+      await updateSession({ step: 1, data: { ...data, colonia_guess: null } });
+      await send("Va 🙂 dime tu *colonia* (Ej: Centro, Las Américas, Morelos).");
+      return;
+    }
+
+    await send("¿Me confirmas con *sí* o *no*? 🙂");
+    return;
+  }
+
+  // STEP 11: calle + número
   if (step === 11) {
-    if (!/\d/.test(txt) || txt.length < 5) {
-      await send("¿Me lo mandas como *calle y número*? Ej: “Hidalgo 311” 🙂");
+    if (!/\d/.test(txt) || txt.length < 4) {
+      await send(`¿Me lo mandas como *calle y número*? Ej: “Hidalgo 311” 🙂`);
       return;
     }
 
     const nextData = { ...data, calle_numero: txt };
-
-    if (String(nextData.cobertura || "").toUpperCase() === "NO") {
-      await updateSession({ step: 99, data: nextData });
-      await send(
-        `Gracias. Por ahora *no tenemos cobertura* en *${nextData.colonia}*.\n` +
-        "Si gustas, dime tu *nombre* y un *teléfono de contacto* y te avisamos cuando llegue 🙏"
-      );
-      return;
-    }
-
     await updateSession({ step: 2, data: nextData });
     await send("Excelente ✅ ¿Cuál es tu *nombre completo*?");
     return;
@@ -220,10 +154,10 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
   // STEP 3: teléfono
   if (step === 3) {
-    const raw = String(inbound.text || "").trim();
+    const raw = txt;
     const lower = raw.toLowerCase();
-
     let tel = null;
+
     if (lower.includes("mismo")) tel = phoneE164;
     if (!tel && looksLikePhone10MX(raw)) tel = normalizeMX10ToE164(raw);
 
@@ -270,8 +204,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       phoneE164,
       nombre: finalData.nombre,
       colonia: finalData.colonia,
-      cobertura: finalData.cobertura,
-      zona: finalData.zona,
       telefono_contacto: finalData.telefono_contacto,
       ine_frente_url: finalData.ine_frente_url,
       ine_reverso_url: finalData.ine_reverso_url
@@ -281,7 +213,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       `📩 NUEVO CONTRATO ${c.folio}\n` +
       `Nombre: ${c.nombre}\n` +
       `Tel: ${c.telefono_contacto}\n` +
-      `Colonia: ${c.colonia} (Zona: ${c.zona || "N/A"})\n` +
+      `Colonia: ${c.colonia}\n` +
       `INE frente: ${c.ine_frente_url}\n` +
       `INE atrás: ${c.ine_reverso_url}`
     );
@@ -292,17 +224,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       `Folio: *${c.folio}*\n\n` +
       "En breve te contactamos para confirmar la instalación 🙌"
     );
-    return;
-  }
-
-  // STEP 99: sin cobertura
-  if (step === 99) {
-    if (!hasMinLen(txt, 3)) {
-      await send("Dime tu *nombre* y un *teléfono* para avisarte cuando haya cobertura 🙂");
-      return;
-    }
-    await closeSession(session.session_id);
-    await send("¡Gracias! ✅ Quedó registrado. En cuanto haya cobertura te avisamos 🙏");
     return;
   }
 
