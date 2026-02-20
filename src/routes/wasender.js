@@ -1,6 +1,7 @@
 // src/routes/wasender.js
 const express = require("express");
 const { verifySecret } = require("../utils/waSecurity");
+
 const {
   isFromMe,
   extractSession,
@@ -8,84 +9,87 @@ const {
   extractFromRaw,
   extractProfileName,
   extractMedia,
-  normalizePhoneToE164
+  normalizePhoneToE164,
+  extractProviderMsgId
 } = require("../utils/waPayload");
 
 const { sendText } = require("../services/wasenderService");
 const { handleInbound, menu } = require("../handlers/inbound");
 const { logger } = require("../utils/logger");
-const { query } = require("../db"); // dedupe rápido
+const { query } = require("../db");
 
 const router = express.Router();
 
 /**
- * Dedupe: true si ya procesamos ese provider_msg_id
+ * Dedupe HARD: intenta registrar el provider_msg_id como "IN" en DB.
+ * Si ya existía (unique), no procesa el flujo.
+ *
+ * OJO: requiere que wa_messages tenga unique uq_wa_messages_provider_msg_id (ya lo tienes).
  */
-async function alreadyProcessed(providerMsgId) {
-  if (!providerMsgId) return false;
+async function tryRegisterInboundDedupe({
+  providerMsgId,
+  phoneE164,
+  sessionId,
+  body,
+  media,
+  raw
+}) {
+  if (!providerMsgId) return { ok: true, inserted: true }; // sin id, no dedupe por DB
+
+  // Insert minimal row (session_id puede ser null aquí)
+  // Si choca el unique, no inserta nada.
+  const sql = `
+    INSERT INTO wa_messages (session_id, phone_e164, direction, body, media, raw, provider_msg_id)
+    VALUES ($1,$2,'IN',$3,$4,$5,$6)
+    ON CONFLICT (provider_msg_id) DO NOTHING
+    RETURNING id
+  `;
+
+  const params = [
+    sessionId || null,
+    phoneE164,
+    body || null,
+    media ? JSON.stringify(media) : null,
+    raw ? JSON.stringify(raw) : null,
+    String(providerMsgId)
+  ];
+
   try {
-    const { rows } = await query(
-      "SELECT 1 FROM wa_messages WHERE provider_msg_id = $1 LIMIT 1",
-      [String(providerMsgId)]
-    );
-    return rows.length > 0;
+    const { rows } = await query(sql, params);
+    if (rows.length === 0) {
+      // ya procesado antes
+      return { ok: true, inserted: false };
+    }
+    return { ok: true, inserted: true, id: rows[0].id };
   } catch (e) {
-    // si falla el query, no bloquees el webhook
-    logger?.warn?.("alreadyProcessed check failed", e);
-    return false;
+    logger?.warn?.("tryRegisterInboundDedupe failed", e);
+    // Si falla DB, no bloqueamos webhook (pero sí podría duplicar)
+    return { ok: false, inserted: true };
   }
 }
 
 /**
- * Extrae provider message id desde distintos formatos
- */
-function getProviderMsgId(payload) {
-  // Wasender real (como tu log): data.messages.key.id
-  const id1 = payload?.data?.messages?.key?.id;
-  if (id1) return String(id1);
-
-  // variantes posibles
-  const id2 = payload?.data?.messages?.id;
-  if (id2) return String(id2);
-
-  const id3 = payload?.data?.message?.id;
-  if (id3) return String(id3);
-
-  const id4 = payload?.id;
-  if (id4) return String(id4);
-
-  return null;
-}
-
-/**
- * Extrae texto robusto incluso si extractText no cubre cambios de payload
+ * Texto robusto (por si cambia payload)
  */
 function safeExtractText(payload) {
-  // intento 1: extractor existente
   try {
     const t = extractText(payload);
     if (typeof t === "string") return t;
   } catch {}
 
-  // Wasender real: data.messages.messageBody o message.conversation
   const b1 = payload?.data?.messages?.messageBody;
   if (typeof b1 === "string") return b1;
 
   const b2 = payload?.data?.messages?.message?.conversation;
   if (typeof b2 === "string") return b2;
 
-  // otro formato común
   const b3 = payload?.data?.message?.text?.body;
   if (typeof b3 === "string") return b3;
 
   return "";
 }
 
-/**
- * POST /wasender/webhook
- */
 router.post("/webhook", async (req, res) => {
-  // Wasender puede reintentar: intenta siempre responder 200
   try {
     if (!verifySecret(req)) return res.status(403).send("Forbidden");
 
@@ -96,40 +100,42 @@ router.post("/webhook", async (req, res) => {
       return res.status(200).send("OK");
     }
 
-    // Ignorar mensajes enviados por ti (fromMe)
-    // (OJO: esto va antes del dedupe para evitar queries innecesarios)
+    // Ignorar mensajes enviados por ti
     if (isFromMe(payload)) return res.status(200).send("OK");
 
-    // provider msg id
-    const providerMsgId = getProviderMsgId(payload);
-
-    // dedupe por msg id (si existe)
-    if (providerMsgId) {
-      const seen = await alreadyProcessed(providerMsgId);
-      if (seen) return res.status(200).send("OK");
-    }
-
-    // session/provider data
     const providerSession = extractSession(payload);
     const fromRaw = extractFromRaw(payload);
     const phoneE164 = normalizePhoneToE164(fromRaw);
-
     if (!phoneE164) return res.status(200).send("OK");
 
     const profileName = extractProfileName(payload);
     const media = extractMedia(payload);
-
     const inboundText = safeExtractText(payload).trim();
+    const providerMsgId = extractProviderMsgId(payload);
 
-    // helper send
     const send = async (textOut) => {
       await sendText({ toE164: phoneE164, text: String(textOut || "") });
     };
 
-    // mensaje totalmente vacío (sin texto y sin media)
+    // vacío total
     if (!inboundText && (!media || media.count === 0)) {
       await send(menu(profileName));
       return res.status(200).json({ ok: true });
+    }
+
+    // ✅ DEDUPE HARD (DB UNIQUE) ANTES de procesar flujo
+    const dedupe = await tryRegisterInboundDedupe({
+      providerMsgId,
+      phoneE164,
+      sessionId: null,
+      body: inboundText || null,
+      media,
+      raw: payload
+    });
+
+    // si ya se procesó, salir sin hacer nada
+    if (providerMsgId && dedupe.ok && dedupe.inserted === false) {
+      return res.status(200).send("OK");
     }
 
     // Ejecutar flujo
@@ -149,7 +155,6 @@ router.post("/webhook", async (req, res) => {
     return res.status(200).json({ ok: true });
   } catch (err) {
     logger.error("Webhook error", err);
-    // 200 para que Wasender no reintente infinito
     return res.status(200).send("OK");
   }
 });
