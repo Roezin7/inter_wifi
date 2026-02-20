@@ -63,15 +63,20 @@ async function handleInbound({ inbound, send }) {
 
   // helper para “send + log OUT” consistente
   async function sendAndLog({ sessionId, flow, step, kind, textOut }) {
-    const polished = await polishReply({
-      intent: flow,
-      step,
-      rawReply: textOut,
-      userText: inbound.text || "",
-      profileName: inbound.profileName || ""
-    });
+    let polished = textOut;
+try {
+  polished = await polishReply({
+    intent: flow,
+    step,
+    rawReply: textOut,
+    userText: inbound.text || "",
+    profileName: inbound.profileName || ""
+  });
+} catch {
+  polished = textOut;
+}
 
-    await send(polished);
+await send(polished);
 
     await insertWaMessage({
       sessionId: sessionId || null,
