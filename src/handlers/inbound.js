@@ -46,6 +46,17 @@ function mapNumberToIntent(text) {
   return null;
 }
 
+function isGreeting(text) {
+  const s = String(text || "").trim().toLowerCase();
+  if (!s) return true;
+  return /^(hola+|hey+|hi+|buenas|buenos dias|buen dia|buenas tardes|buenas noches|que onda|qué onda|q onda|ola)\b/.test(s);
+}
+
+function isMenuWord(text) {
+  const s = String(text || "").trim().toLowerCase();
+  return /^(menu|menú|inicio|start|volver|regresar|opciones)$/i.test(s);
+}
+
 /**
  * handleInbound: corre SIEMPRE en 1 sola conexión (client) para que:
  * - SELECT FOR UPDATE sí bloquee
@@ -55,8 +66,8 @@ function mapNumberToIntent(text) {
 async function handleInbound({ inbound, send }) {
   const providerMsgId = inbound.providerMsgId || null;
 
-  // 0) Dedupe hard: si ya procesaste ese msg id, corta sin responder.
-  // (Tu insertWaMessage debe hacer INSERT ... ON CONFLICT DO NOTHING y retornar null si duplicado)
+  // 0) Dedupe hard (idempotente)
+  // insertWaMessage debe hacer INSERT ... ON CONFLICT(provider_msg_id) DO NOTHING RETURNING ...
   const insertedIn = await insertWaMessage({
     sessionId: null,
     phoneE164: inbound.phoneE164,
@@ -67,9 +78,10 @@ async function handleInbound({ inbound, send }) {
     providerMsgId
   });
 
+  // Si ya existía ese msg_id => era retry => NO respondas otra vez
   if (!insertedIn) return;
 
-  // 1) helper send + log OUT (NO revienta si falla LLM)
+  // helper send + log OUT (NO revienta si falla LLM)
   async function sendAndLog({ sessionId, flow, step, kind, textOut }) {
     let polished = String(textOut || "").trim();
 
@@ -90,6 +102,7 @@ async function handleInbound({ inbound, send }) {
       await send(polished);
     }
 
+    // OUT log (sin provider_msg_id)
     await insertWaMessage({
       sessionId: sessionId || null,
       phoneE164: inbound.phoneE164,
@@ -101,18 +114,32 @@ async function handleInbound({ inbound, send }) {
     return polished;
   }
 
-  // 2) TX REAL: 1 solo client
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
 
-    // 2.1) buscar sesión OPEN con el mismo client
+    // 1) buscar sesión OPEN (MISMO client)
     let existing = await getOpenSessionByPhone(inbound.phoneE164, client);
 
-    // 3) Si NO hay sesión: rutea + crea sesión (en la MISMA TX)
+    const inboundText = String(inbound.text || "").trim();
+
+    // 2) Si NO hay sesión: si es saludo / menu / corto => NO abras sesión, manda menú y termina
     if (!existing) {
-      const nIntent = mapNumberToIntent(inbound.text);
-      const routed = nIntent ? { intent: nIntent } : await routeIntent(inbound.text || "");
+      if (!inboundText || inboundText.length < 3 || isGreeting(inboundText) || isMenuWord(inboundText)) {
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: null,
+          flow: "MENU",
+          step: 0,
+          kind: "menu",
+          textOut: menu(inbound.profileName)
+        });
+        return;
+      }
+
+      // 3) rutea + crea sesión
+      const nIntent = mapNumberToIntent(inboundText);
+      const routed = nIntent ? { intent: nIntent } : await routeIntent(inboundText);
       const flow = routed?.intent || "FAQ";
 
       const session = await createSession(
@@ -139,7 +166,7 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // 4) Con sesión existente: lock FOR UPDATE (MISMA TX / MISMO CLIENT)
+    // 4) Con sesión existente: lock FOR UPDATE (MISMO TX / MISMO CLIENT)
     const locked = await lockSession(existing.session_id, client);
 
     if (!locked) {
@@ -182,9 +209,7 @@ async function handleInbound({ inbound, send }) {
 
     await client.query("COMMIT");
   } catch (e) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {}
+    try { await client.query("ROLLBACK"); } catch {}
     throw e;
   } finally {
     client.release();
