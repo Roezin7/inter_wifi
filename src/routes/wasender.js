@@ -1,3 +1,4 @@
+// src/routes/wasender.js
 const express = require("express");
 const { verifySecret } = require("../utils/waSecurity");
 const {
@@ -18,24 +19,27 @@ const { query } = require("../db");
 const router = express.Router();
 
 function getProviderMsgId(payload) {
-  const id1 = payload?.data?.messages?.key?.id;
-  if (id1) return String(id1);
-  const id2 = payload?.data?.messages?.id;
-  if (id2) return String(id2);
-  const id3 = payload?.data?.message?.id;
-  if (id3) return String(id3);
-  const id4 = payload?.id;
-  if (id4) return String(id4);
-  return null;
+  return (
+    payload?.data?.messages?.key?.id ||
+    payload?.data?.messages?.id ||
+    payload?.data?.message?.id ||
+    payload?.id ||
+    null
+  );
 }
 
 async function alreadyProcessed(providerMsgId) {
   if (!providerMsgId) return false;
-  const { rows } = await query(
-    "select 1 from wa_messages where provider_msg_id = $1 limit 1",
-    [String(providerMsgId)]
-  );
-  return rows.length > 0;
+  try {
+    const { rows } = await query(
+      "SELECT 1 FROM wa_messages WHERE provider_msg_id = $1 LIMIT 1",
+      [String(providerMsgId)]
+    );
+    return rows.length > 0;
+  } catch (e) {
+    logger?.warn?.("alreadyProcessed failed", e);
+    return false;
+  }
 }
 
 function safeExtractText(payload) {
@@ -43,11 +47,13 @@ function safeExtractText(payload) {
     const t = extractText(payload);
     if (typeof t === "string") return t;
   } catch {}
-  const b1 = payload?.data?.messages?.messageBody;
-  if (typeof b1 === "string") return b1;
-  const b2 = payload?.data?.messages?.message?.conversation;
-  if (typeof b2 === "string") return b2;
-  return "";
+
+  return (
+    payload?.data?.messages?.messageBody ||
+    payload?.data?.messages?.message?.conversation ||
+    payload?.data?.message?.text?.body ||
+    ""
+  );
 }
 
 router.post("/webhook", async (req, res) => {
@@ -63,8 +69,6 @@ router.post("/webhook", async (req, res) => {
     if (isFromMe(payload)) return res.status(200).send("OK");
 
     const providerMsgId = getProviderMsgId(payload);
-
-    // ✅ dedupe ultra temprano
     if (providerMsgId) {
       const seen = await alreadyProcessed(providerMsgId);
       if (seen) return res.status(200).send("OK");
@@ -77,10 +81,11 @@ router.post("/webhook", async (req, res) => {
 
     const profileName = extractProfileName(payload);
     const media = extractMedia(payload);
-    const inboundText = safeExtractText(payload).trim();
+    const inboundText = String(safeExtractText(payload) || "").trim();
 
-    const send = async (textOut) =>
-      sendText({ toE164: phoneE164, text: String(textOut || "") });
+    const send = async (textOut) => {
+      await sendText({ toE164: phoneE164, text: String(textOut || "") });
+    };
 
     if (!inboundText && (!media || media.count === 0)) {
       await send(menu(profileName));

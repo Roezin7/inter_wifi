@@ -26,13 +26,12 @@ function menu(profileName) {
     `• Reportar una falla\n` +
     `• Registrar un pago\n` +
     `• Info (horarios, ubicación, formas de pago)\n\n` +
-    `Puedes escribirlo tal cual (ej. “contratar”) o si prefieres 1, 2, 3, 4 🙂`
+    `Puedes responder con una opción (ej. “contratar”) o con 1, 2, 3, 4 🙂`
   );
 }
 
 function mapNumberToIntent(text) {
   const t = String(text || "").trim().toLowerCase();
-
   if (t === "1") return "CONTRATO";
   if (t === "2") return "FALLA";
   if (t === "3") return "PAGO";
@@ -42,64 +41,66 @@ function mapNumberToIntent(text) {
   if (/(falla|no (tengo|hay) internet|sin internet|intermit|lento|no carga)/i.test(t)) return "FALLA";
   if (/(pago|pagu|deposit|transfer|comprobante|ticket)/i.test(t)) return "PAGO";
   if (/(horario|ubic|direccion|donde|precio|cost|costo|paquete|plan)/i.test(t)) return "FAQ";
-
   return null;
 }
 
 async function handleInbound({ inbound, send }) {
-// 1) Log inbound siempre (pero dedupea por providerMsgId)
-const inserted = await insertWaMessage({
-  sessionId: null,
-  phoneE164: inbound.phoneE164,
-  direction: "IN",
-  body: inbound.text || "",
-  media: inbound.media,
-  raw: inbound.raw,
-  providerMsgId: inbound.providerMsgId
-});
+  const providerMsgId = inbound.providerMsgId || null;
 
-// si no insertó => ya procesado
-if (!inserted && inbound.providerMsgId) return;
+  // 1) Log IN (idempotente)
+  const insertedIn = await insertWaMessage({
+    sessionId: null,
+    phoneE164: inbound.phoneE164,
+    direction: "IN",
+    body: inbound.text || "",
+    media: inbound.media,
+    raw: inbound.raw,
+    providerMsgId
+  });
 
+  // ✅ Si ya existía ese provider_msg_id => era retry => NO respondas otra vez
+  // (insertedIn será null o el registro existente; lo importante es cortar aquí)
+  if (!insertedIn) {
+    return;
+  }
+
+  // 2) Buscar sesión abierta (la más reciente, ver FIX #3)
   const existing = await getOpenSessionByPhone(inbound.phoneE164);
 
   async function sendAndLog({ sessionId, flow, step, kind, textOut }) {
-    let polished = textOut;
+    let polished = String(textOut || "");
+
     try {
-      polished = await polishReply({
-        intent: flow,
-        step,
-        rawReply: textOut,
-        userText: inbound.text || "",
-        profileName: inbound.profileName || ""
-      });
+      polished =
+        (await polishReply({
+          intent: flow,
+          step,
+          rawReply: polished,
+          userText: inbound.text || "",
+          profileName: inbound.profileName || ""
+        })) || polished;
     } catch {
-      polished = textOut;
+      // no tumbar
     }
 
     await send(polished);
 
-    // OUT no necesita providerMsgId (si no lo tienes), déjalo null
+    // OUT log (no necesita provider_msg_id)
     await insertWaMessage({
       sessionId: sessionId || null,
       phoneE164: inbound.phoneE164,
       direction: "OUT",
       body: polished,
-      raw: { kind, flow, step },
-      providerMsgId: null
+      raw: { kind, flow, step }
     });
 
     return polished;
   }
 
-  // 2) Si NO hay sesión: crear y responder intro
+  // 3) Si NO hay sesión: rutea y crea
   if (!existing) {
     const nIntent = mapNumberToIntent(inbound.text);
-
-    const routed = nIntent
-      ? { intent: nIntent }
-      : await routeIntent(inbound.text || "");
-
+    const routed = nIntent ? { intent: nIntent } : await routeIntent(inbound.text || "");
     const flow = routed?.intent || "FAQ";
 
     const session = await createSession({
@@ -111,9 +112,9 @@ if (!inserted && inbound.providerMsgId) return;
 
     let introText = menu(inbound.profileName);
     if (flow === "CONTRATO") introText = contrato.intro(inbound.phoneE164);
-    else if (flow === "PAGO") introText = pago.intro(inbound.phoneE164);
-    else if (flow === "FALLA") introText = falla.intro(inbound.phoneE164);
-    else introText = faq.intro(inbound.phoneE164);
+    else if (flow === "PAGO") introText = pago.intro();
+    else if (flow === "FALLA") introText = falla.intro();
+    else introText = faq.intro();
 
     await sendAndLog({
       sessionId: session.session_id,
@@ -122,11 +123,10 @@ if (!inserted && inbound.providerMsgId) return;
       kind: "intro",
       textOut: introText
     });
-
     return;
   }
 
-  // 3) Con sesión existente: lock + handler
+  // 4) Con sesión existente: TX + lock
   await pool.query("BEGIN");
   try {
     const locked = await lockSession(existing.session_id);
@@ -142,8 +142,6 @@ if (!inserted && inbound.providerMsgId) return;
       });
       return;
     }
-
-    inbound.sessionId = locked.session_id;
 
     const ctx = {
       session: locked,
