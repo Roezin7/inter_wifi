@@ -10,7 +10,7 @@ async function findColoniaMatch(userText, limit = 5) {
   const { rows } = await query(
     `
     SELECT name_display, similarity(name_norm, $1) AS sim
-    FROM coverage_colonias
+    FROM coverage_colonias_v2
     WHERE active = true
       AND name_norm % $1
     ORDER BY sim DESC
