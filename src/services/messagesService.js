@@ -1,30 +1,31 @@
 // src/services/messagesService.js
 const { query } = require("../db");
 
-/**
- * Inserta mensaje IN/OUT de forma idempotente.
- * - Si provider_msg_id ya existe => NO duplica (evita loops por retries)
- * - Devuelve el registro existente o el nuevo
- */
-async function insertWaMessage({
-  sessionId,
-  phoneE164,
-  direction,
-  body,
-  media,
-  raw,
-  providerMsgId // <- NUEVO
-}) {
-  const provider = providerMsgId ? String(providerMsgId) : null;
+async function insertWaMessage({ sessionId, phoneE164, direction, body, media, raw, providerMsgId }) {
+  // Si NO hay providerMsgId (OUT), inserta normal
+  if (!providerMsgId) {
+    const r = await query(
+      `insert into wa_messages (session_id, phone_e164, direction, body, media, raw)
+       values ($1,$2,$3,$4,$5,$6)
+       returning id, created_at`,
+      [
+        sessionId || null,
+        phoneE164,
+        direction,
+        body || null,
+        media ? JSON.stringify(media) : null,
+        raw ? JSON.stringify(raw) : null
+      ]
+    );
+    return r.rows[0];
+  }
 
-  // INSERT idempotente
+  // Si hay providerMsgId (IN), dedupe con ON CONFLICT
   const r = await query(
-    `
-    INSERT INTO wa_messages (session_id, phone_e164, direction, body, media, raw, provider_msg_id)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
-    ON CONFLICT (provider_msg_id) DO NOTHING
-    RETURNING id, created_at
-    `,
+    `insert into wa_messages (session_id, phone_e164, direction, body, media, raw, provider_msg_id)
+     values ($1,$2,$3,$4,$5,$6,$7)
+     on conflict (provider_msg_id) do nothing
+     returning id, created_at`,
     [
       sessionId || null,
       phoneE164,
@@ -32,19 +33,11 @@ async function insertWaMessage({
       body || null,
       media ? JSON.stringify(media) : null,
       raw ? JSON.stringify(raw) : null,
-      provider
+      String(providerMsgId)
     ]
   );
 
-  // Si fue duplicado, regresamos el existente
-  if (r.rows.length === 0 && provider) {
-    const e = await query(
-      `SELECT id, created_at FROM wa_messages WHERE provider_msg_id = $1 LIMIT 1`,
-      [provider]
-    );
-    return e.rows[0] || null;
-  }
-
+  // si rows.length === 0 => ya existía => RETRY => no respondas
   return r.rows[0] || null;
 }
 
