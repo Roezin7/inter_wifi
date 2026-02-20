@@ -1,10 +1,11 @@
 function norm(s) {
   return String(s || "")
-    .trim()
     .toLowerCase()
     .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, " ");
+    .replace(/[\u0300-\u036f]/g, "")     // quita acentos
+    .replace(/[^a-z0-9\s]/g, " ")        // quita símbolos raros
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function safeText(x) {
