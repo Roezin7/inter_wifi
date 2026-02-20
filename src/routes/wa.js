@@ -1,6 +1,6 @@
 const express = require("express");
 const { sendText } = require("../services/wasenderService");
-const { normalizeToE164 } = require("../../utils/phoneUtils");
+const { normalizeToE164 } = require("../utils/phoneUtils");
 const { insertWaMessage } = require("../services/messagesService");
 
 const router = express.Router();
@@ -8,10 +8,14 @@ const router = express.Router();
 router.post("/outbound", async (req, res) => {
   try {
     const { to_phone_e164, text } = req.body || {};
-    if (!to_phone_e164 || !text) return res.status(400).json({ ok: false, error: "missing_fields" });
+    if (!to_phone_e164 || !text) {
+      return res.status(400).json({ ok: false, error: "missing_fields" });
+    }
 
     const toE164 = normalizeToE164(to_phone_e164);
-    if (!toE164) return res.status(400).json({ ok: false, error: "invalid_to_phone" });
+    if (!toE164) {
+      return res.status(400).json({ ok: false, error: "invalid_to_phone" });
+    }
 
     const providerResp = await sendText({ toE164, text: String(text) });
 
