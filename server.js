@@ -9,7 +9,7 @@ const rateLimit = require("express-rate-limit");
 const { runMigrations } = require("./src/db");
 const wasenderRouter = require("./src/routes/wasender");
 const waRouter = require("./src/routes/wa");
-const { logger } = require("./utils/logger");
+const { logger } = require("./src/utils/logger");
 
 const app = express();
 
