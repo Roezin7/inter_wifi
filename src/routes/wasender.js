@@ -14,12 +14,12 @@ const {
 const { sendText } = require("../services/wasenderService");
 const { handleInbound, menu } = require("../handlers/inbound");
 const { logger } = require("../utils/logger");
-const { query } = require("../db"); // para dedupe rápido (sin depender de otro service)
+const { query } = require("../db"); // dedupe rápido
 
 const router = express.Router();
 
 /**
- * Dedupe: regresa true si ya procesamos ese msg_id
+ * Dedupe: true si ya procesamos ese provider_msg_id
  */
 async function alreadyProcessed(providerMsgId) {
   if (!providerMsgId) return false;
@@ -29,55 +29,63 @@ async function alreadyProcessed(providerMsgId) {
       [String(providerMsgId)]
     );
     return rows.length > 0;
-  } catch {
+  } catch (e) {
+    // si falla el query, no bloquees el webhook
+    logger?.warn?.("alreadyProcessed check failed", e);
     return false;
   }
 }
 
 /**
- * Extrae provider msg id desde distintos formatos
+ * Extrae provider message id desde distintos formatos
  */
 function getProviderMsgId(payload) {
-  // Wasender real (como tu log):
+  // Wasender real (como tu log): data.messages.key.id
   const id1 = payload?.data?.messages?.key?.id;
   if (id1) return String(id1);
 
-  // Tu mock anterior:
-  const id2 = payload?.data?.message?.id;
+  // variantes posibles
+  const id2 = payload?.data?.messages?.id;
   if (id2) return String(id2);
 
-  // fallback
-  const id3 = payload?.id;
+  const id3 = payload?.data?.message?.id;
   if (id3) return String(id3);
+
+  const id4 = payload?.id;
+  if (id4) return String(id4);
 
   return null;
 }
 
 /**
- * Extrae texto de forma “bulletproof” incluso si extractText no cubre el payload nuevo
+ * Extrae texto robusto incluso si extractText no cubre cambios de payload
  */
 function safeExtractText(payload) {
+  // intento 1: extractor existente
   try {
     const t = extractText(payload);
     if (typeof t === "string") return t;
   } catch {}
 
-  // Wasender real log: data.messages.messageBody o message.conversation
+  // Wasender real: data.messages.messageBody o message.conversation
   const b1 = payload?.data?.messages?.messageBody;
   if (typeof b1 === "string") return b1;
 
   const b2 = payload?.data?.messages?.message?.conversation;
   if (typeof b2 === "string") return b2;
 
-  // Mock: data.message.text.body
+  // otro formato común
   const b3 = payload?.data?.message?.text?.body;
   if (typeof b3 === "string") return b3;
 
   return "";
 }
 
+/**
+ * POST /wasender/webhook
+ */
 router.post("/webhook", async (req, res) => {
-  // Importante: Wasender reintenta; siempre contesta 200 cuando puedas
+  // Wasender puede reintentar: intenta siempre responder 200
   try {
     if (!verifySecret(req)) return res.status(403).send("Forbidden");
 
@@ -88,17 +96,21 @@ router.post("/webhook", async (req, res) => {
       return res.status(200).send("OK");
     }
 
-    // dedupe por msg id
+    // Ignorar mensajes enviados por ti (fromMe)
+    // (OJO: esto va antes del dedupe para evitar queries innecesarios)
+    if (isFromMe(payload)) return res.status(200).send("OK");
+
+    // provider msg id
     const providerMsgId = getProviderMsgId(payload);
+
+    // dedupe por msg id (si existe)
     if (providerMsgId) {
       const seen = await alreadyProcessed(providerMsgId);
       if (seen) return res.status(200).send("OK");
     }
 
-    // ignorar mensajes fromMe
-    if (isFromMe(payload)) return res.status(200).send("OK");
-
-    const providerSession = extractSession(payload); // id de instancia/session de Wasender
+    // session/provider data
+    const providerSession = extractSession(payload);
     const fromRaw = extractFromRaw(payload);
     const phoneE164 = normalizePhoneToE164(fromRaw);
 
@@ -109,12 +121,12 @@ router.post("/webhook", async (req, res) => {
 
     const inboundText = safeExtractText(payload).trim();
 
-    // helper send (Wasender)
+    // helper send
     const send = async (textOut) => {
       await sendText({ toE164: phoneE164, text: String(textOut || "") });
     };
 
-    // Si viene totalmente vacío (sin texto ni media), responde con saludo natural
+    // mensaje totalmente vacío (sin texto y sin media)
     if (!inboundText && (!media || media.count === 0)) {
       await send(menu(profileName));
       return res.status(200).json({ ok: true });
@@ -129,7 +141,7 @@ router.post("/webhook", async (req, res) => {
         media,
         raw: payload,
         providerSession,
-        providerMsgId // <- pásalo para guardar en DB
+        providerMsgId
       },
       send
     });
