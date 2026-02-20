@@ -1,63 +1,99 @@
+// src/handlers/inbound.js
 const { pool } = require("../db");
-const { routeIntent } = require("../services/llmService");
+
+const { routeIntent, polishReply } = require("../services/llmService");
 const { insertWaMessage } = require("../services/messagesService");
-const { getOpenSessionByPhone, createSession, lockSession, updateSession, closeSession } = require("../services/sessionsService");
+const {
+  getOpenSessionByPhone,
+  createSession,
+  lockSession,
+  updateSession,
+  closeSession
+} = require("../services/sessionsService");
 
 const contrato = require("./flows/contrato");
 const pago = require("./flows/pago");
 const falla = require("./flows/falla");
 const faq = require("./flows/faq");
 
-function menu() {
+function menu(profileName) {
+  const name = profileName ? ` ${profileName}` : "";
   return (
-    "¡Hola! 👋 Soy el asistente de InterWIFI.\n\n" +
-    "¿Qué te gustaría hacer?\n" +
-    "1) Contratar internet\n" +
-    "2) Reportar falla\n" +
-    "3) Registrar pago\n" +
-    "4) Dudas (horarios, precios, ubicación)\n\n" +
-    "Responde con el número o escríbelo con tus palabras 🙂"
+    `¡Hola${name}! 👋\n` +
+    `Soy del equipo de InterWIFI.\n\n` +
+    `¿En qué te ayudo hoy?\n` +
+    `• Contratar internet\n` +
+    `• Reportar una falla\n` +
+    `• Registrar un pago\n` +
+    `• Info (horarios, ubicación, formas de pago)\n\n` +
+    `Puedes responder con una opción (ej. “contratar”) o con 1, 2, 3, 4 🙂`
   );
 }
 
 function mapNumberToIntent(text) {
-  const t = String(text || "").trim();
+  const t = String(text || "").trim().toLowerCase();
+
   if (t === "1") return "CONTRATO";
   if (t === "2") return "FALLA";
   if (t === "3") return "PAGO";
   if (t === "4") return "FAQ";
+
+  // También acepta palabras
+  if (/(contrat|instal|servicio|internet)/i.test(t)) return "CONTRATO";
+  if (/(falla|no (tengo|hay) internet|sin internet|intermit|lento|no carga)/i.test(t)) return "FALLA";
+  if (/(pago|pagu|deposit|transfer|comprobante|ticket)/i.test(t)) return "PAGO";
+  if (/(horario|ubic|direccion|donde|precio|cost|costo|paquete|plan)/i.test(t)) return "FAQ";
+
   return null;
 }
 
 async function handleInbound({ inbound, send }) {
-  // 1) Log inbound always
+  // 1) Log inbound siempre
   await insertWaMessage({
     sessionId: null,
     phoneE164: inbound.phoneE164,
     direction: "IN",
-    body: inbound.text,
+    body: inbound.text || "",
     media: inbound.media,
     raw: inbound.raw
   });
 
-  // 2) Existing session?
+  // 2) Buscar sesión abierta
   const existing = await getOpenSessionByPhone(inbound.phoneE164);
 
-  // helper for consistent api to flow handlers
-  const api = {
-    send,
-    updateSession: ({ step, data }) => updateSession({ sessionId: inbound.sessionId, step, data }),
-    closeSession: (sid) => closeSession(sid)
-  };
+  // helper para “send + log OUT” consistente
+  async function sendAndLog({ sessionId, flow, step, kind, textOut }) {
+    const polished = await polishReply({
+      intent: flow,
+      step,
+      rawReply: textOut,
+      userText: inbound.text || "",
+      profileName: inbound.profileName || ""
+    });
 
+    await send(polished);
+
+    await insertWaMessage({
+      sessionId: sessionId || null,
+      phoneE164: inbound.phoneE164,
+      direction: "OUT",
+      body: polished,
+      raw: { kind, flow, step }
+    });
+
+    return polished;
+  }
+
+  // 3) Si NO hay sesión: enrutamos intención y creamos sesión
   if (!existing) {
-    // First message: route intent
     const nIntent = mapNumberToIntent(inbound.text);
-    const { intent } = nIntent
-      ? { intent: nIntent }
-      : await routeIntent(inbound.text);
 
-    const flow = intent || "FAQ";
+    const routed = nIntent
+      ? { intent: nIntent }
+      : await routeIntent(inbound.text || "");
+
+    const flow = routed?.intent || "FAQ";
+
     const session = await createSession({
       phoneE164: inbound.phoneE164,
       flow,
@@ -65,63 +101,62 @@ async function handleInbound({ inbound, send }) {
       data: {}
     });
 
-    // Save inbound message with session_id link (optional)
-    // (No reinsert; keep it simple)
-
-    // respond intro
-    let introText = menu();
+    let introText = menu(inbound.profileName);
     if (flow === "CONTRATO") introText = contrato.intro();
-    if (flow === "PAGO") introText = pago.intro();
-    if (flow === "FALLA") introText = falla.intro();
-    if (flow === "FAQ") introText = faq.intro();
+    else if (flow === "PAGO") introText = pago.intro();
+    else if (flow === "FALLA") introText = falla.intro();
+    else introText = faq.intro();
 
-    await send(introText);
-
-    // log outbound
-    await insertWaMessage({
+    await sendAndLog({
       sessionId: session.session_id,
-      phoneE164: inbound.phoneE164,
-      direction: "OUT",
-      body: introText,
-      raw: { kind: "intro", flow }
+      flow,
+      step: 1,
+      kind: "intro",
+      textOut: introText
     });
 
     return;
   }
 
-  // 3) Process with transaction + lock to avoid races
+  // 4) Con sesión existente: transacción + lock
   await pool.query("BEGIN");
   try {
     const locked = await lockSession(existing.session_id);
+
     if (!locked) {
       await pool.query("COMMIT");
-      await send(menu());
+      await sendAndLog({
+        sessionId: existing.session_id,
+        flow: existing.flow || "FAQ",
+        step: existing.step || 1,
+        kind: "lock_failed",
+        textOut: menu(inbound.profileName)
+      });
       return;
     }
 
-    // attach to inbound
     inbound.sessionId = locked.session_id;
 
     const ctx = {
       session: locked,
       inbound,
-      send: async (text) => {
-        await send(text);
-        await insertWaMessage({
+      send: async (textOut) => {
+        await sendAndLog({
           sessionId: locked.session_id,
-          phoneE164: inbound.phoneE164,
-          direction: "OUT",
-          body: text,
-          raw: { kind: "flow_reply", flow: locked.flow, step: locked.step }
+          flow: locked.flow,
+          step: locked.step,
+          kind: "flow_reply",
+          textOut
         });
       },
       updateSession: async ({ step, data }) => {
-        const updated = await updateSession({ sessionId: locked.session_id, step, data });
-        return updated;
+        // FIX: antes estabas usando inbound.sessionId en api.updateSession sin estar asignado
+        return await updateSession({ sessionId: locked.session_id, step, data });
       },
-      closeSession: async (sid) => closeSession(sid)
+      closeSession: async (sid) => closeSession(sid || locked.session_id)
     };
 
+    // 5) Ejecuta flow handler
     if (locked.flow === "CONTRATO") await contrato.handle(ctx);
     else if (locked.flow === "PAGO") await pago.handle(ctx);
     else if (locked.flow === "FALLA") await falla.handle(ctx);

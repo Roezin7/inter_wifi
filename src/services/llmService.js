@@ -177,9 +177,43 @@ async function parsePhoneE164(text, fallbackE164) {
   return out;
 }
 
+// Añade al final de llmService.js
+async function polishReply({ intent, step, rawReply, userText, profileName }) {
+  // si no hay LLM, regresamos el texto base
+  if (process.env.LLM_PROVIDER === "none") return rawReply;
+
+  const name = profileName ? `El cliente se llama ${profileName}.` : "";
+
+  const system = `
+Eres un asistente humano profesional de una empresa de internet (InterWIFI) en Encarnación de Díaz, Jalisco.
+Objetivo: responder como persona real, cálida, clara y eficiente.
+Reglas:
+- NO digas que eres bot.
+- NO uses "Responde con el número".
+- Mantén mensajes cortos, naturales, con 1 pregunta a la vez.
+- Sé amable y directo. Usa emojis con moderación (máx 1 por mensaje).
+- Si el usuario pide horarios/precios/ubicación/pagos: contesta con precisión.
+- Si estás en un flujo (CONTRATO/PAGO/FALLA): guía el proceso sin sonar robótico.
+${name}
+  `.trim();
+
+  const user = `
+INTENT=${intent || "unknown"} STEP=${step || ""}
+Mensaje del cliente: ${userText || ""}
+Texto base a entregar (no lo inventes, solo mejora estilo y naturalidad):
+${rawReply}
+  `.trim();
+
+  // Usa tu cliente LLM existente (routeIntent ya lo usa)
+  // Aquí asumo que tienes una función interna callLLM(system,user)
+  const out = await callLLM(system, user, { temperature: 0.7, maxTokens: 220 });
+  return String(out || rawReply).trim() || rawReply;
+}
+
 module.exports = {
   routeIntent,
   extractColoniaHint,
   parsePaymentMesMonto,
-  parsePhoneE164
+  parsePhoneE164,
+  polishReply
 };
