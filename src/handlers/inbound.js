@@ -32,6 +32,7 @@ function menu(profileName) {
 
 function mapNumberToIntent(text) {
   const t = String(text || "").trim().toLowerCase();
+
   if (t === "1") return "CONTRATO";
   if (t === "2") return "FALLA";
   if (t === "3") return "PAGO";
@@ -41,13 +42,21 @@ function mapNumberToIntent(text) {
   if (/(falla|no (tengo|hay) internet|sin internet|intermit|lento|no carga)/i.test(t)) return "FALLA";
   if (/(pago|pagu|deposit|transfer|comprobante|ticket)/i.test(t)) return "PAGO";
   if (/(horario|ubic|direccion|donde|precio|cost|costo|paquete|plan)/i.test(t)) return "FAQ";
+
   return null;
 }
 
+/**
+ * handleInbound: corre SIEMPRE en 1 sola conexión (client) para que:
+ * - SELECT FOR UPDATE sí bloquee
+ * - updateSession/closeSession no se “vayan” a otra conexión
+ * - evites race conditions / loops
+ */
 async function handleInbound({ inbound, send }) {
   const providerMsgId = inbound.providerMsgId || null;
 
-  // 1) Log IN (idempotente)
+  // 0) Dedupe hard: si ya procesaste ese msg id, corta sin responder.
+  // (Tu insertWaMessage debe hacer INSERT ... ON CONFLICT DO NOTHING y retornar null si duplicado)
   const insertedIn = await insertWaMessage({
     sessionId: null,
     phoneE164: inbound.phoneE164,
@@ -58,81 +67,83 @@ async function handleInbound({ inbound, send }) {
     providerMsgId
   });
 
-  // ✅ Si ya existía ese provider_msg_id => era retry => NO respondas otra vez
-  // (insertedIn será null o el registro existente; lo importante es cortar aquí)
-  if (!insertedIn) {
-    return;
-  }
+  if (!insertedIn) return;
 
-  // 2) Buscar sesión abierta (la más reciente, ver FIX #3)
-  const existing = await getOpenSessionByPhone(inbound.phoneE164);
-
+  // 1) helper send + log OUT (NO revienta si falla LLM)
   async function sendAndLog({ sessionId, flow, step, kind, textOut }) {
-    let polished = String(textOut || "");
+    let polished = String(textOut || "").trim();
 
     try {
-      polished =
-        (await polishReply({
-          intent: flow,
-          step,
-          rawReply: polished,
-          userText: inbound.text || "",
-          profileName: inbound.profileName || ""
-        })) || polished;
+      const out = await polishReply({
+        intent: flow,
+        step,
+        rawReply: polished,
+        userText: inbound.text || "",
+        profileName: inbound.profileName || ""
+      });
+      if (out) polished = String(out).trim();
     } catch {
-      // no tumbar
+      // noop
     }
 
-    await send(polished);
+    if (polished) {
+      await send(polished);
+    }
 
-    // OUT log (no necesita provider_msg_id)
     await insertWaMessage({
       sessionId: sessionId || null,
       phoneE164: inbound.phoneE164,
       direction: "OUT",
-      body: polished,
+      body: polished || null,
       raw: { kind, flow, step }
     });
 
     return polished;
   }
 
-  // 3) Si NO hay sesión: rutea y crea
-  if (!existing) {
-    const nIntent = mapNumberToIntent(inbound.text);
-    const routed = nIntent ? { intent: nIntent } : await routeIntent(inbound.text || "");
-    const flow = routed?.intent || "FAQ";
-
-    const session = await createSession({
-      phoneE164: inbound.phoneE164,
-      flow,
-      step: 1,
-      data: {}
-    });
-
-    let introText = menu(inbound.profileName);
-    if (flow === "CONTRATO") introText = contrato.intro(inbound.phoneE164);
-    else if (flow === "PAGO") introText = pago.intro();
-    else if (flow === "FALLA") introText = falla.intro();
-    else introText = faq.intro();
-
-    await sendAndLog({
-      sessionId: session.session_id,
-      flow,
-      step: 1,
-      kind: "intro",
-      textOut: introText
-    });
-    return;
-  }
-
-  // 4) Con sesión existente: TX + lock
-  await pool.query("BEGIN");
+  // 2) TX REAL: 1 solo client
+  const client = await pool.connect();
   try {
-    const locked = await lockSession(existing.session_id);
+    await client.query("BEGIN");
+
+    // 2.1) buscar sesión OPEN con el mismo client
+    let existing = await getOpenSessionByPhone(inbound.phoneE164, client);
+
+    // 3) Si NO hay sesión: rutea + crea sesión (en la MISMA TX)
+    if (!existing) {
+      const nIntent = mapNumberToIntent(inbound.text);
+      const routed = nIntent ? { intent: nIntent } : await routeIntent(inbound.text || "");
+      const flow = routed?.intent || "FAQ";
+
+      const session = await createSession(
+        { phoneE164: inbound.phoneE164, flow, step: 1, data: {} },
+        client
+      );
+
+      let introText = menu(inbound.profileName);
+      if (flow === "CONTRATO") introText = contrato.intro(inbound.phoneE164);
+      else if (flow === "PAGO") introText = pago.intro();
+      else if (flow === "FALLA") introText = falla.intro();
+      else introText = faq.intro();
+
+      await client.query("COMMIT");
+
+      await sendAndLog({
+        sessionId: session.session_id,
+        flow,
+        step: 1,
+        kind: "intro",
+        textOut: introText
+      });
+
+      return;
+    }
+
+    // 4) Con sesión existente: lock FOR UPDATE (MISMA TX / MISMO CLIENT)
+    const locked = await lockSession(existing.session_id, client);
 
     if (!locked) {
-      await pool.query("COMMIT");
+      await client.query("COMMIT");
       await sendAndLog({
         sessionId: existing.session_id,
         flow: existing.flow || "FAQ",
@@ -156,20 +167,27 @@ async function handleInbound({ inbound, send }) {
         });
       },
       updateSession: async ({ step, data }) => {
-        return await updateSession({ sessionId: locked.session_id, step, data });
+        return updateSession({ sessionId: locked.session_id, step, data }, client);
       },
-      closeSession: async (sid) => closeSession(sid || locked.session_id)
+      closeSession: async (sid) => {
+        return closeSession(sid || locked.session_id, client);
+      }
     };
 
+    // 5) Ejecuta flow handler
     if (locked.flow === "CONTRATO") await contrato.handle(ctx);
     else if (locked.flow === "PAGO") await pago.handle(ctx);
     else if (locked.flow === "FALLA") await falla.handle(ctx);
     else await faq.handle(ctx);
 
-    await pool.query("COMMIT");
+    await client.query("COMMIT");
   } catch (e) {
-    await pool.query("ROLLBACK");
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
     throw e;
+  } finally {
+    client.release();
   }
 }
 
