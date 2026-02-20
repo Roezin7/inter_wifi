@@ -17,25 +17,36 @@ try {
   ({ templates, pick } = require("../../utils/replies"));
 } catch {}
 
-/** Heurística: evita IA si NO parece dirección */
+/**
+ * ✅ FIX:
+ * "Colonia Centro" / "Col. Centro" NO es dirección.
+ * Dirección = trae número/coma o palabra tipo calle/av/etc.
+ */
 function looksLikeAddress(text) {
   const s = String(text || "").trim();
   if (s.length < 3) return false;
 
+  const lower = s.toLowerCase();
   const hasNumber = /\d/.test(s);
   const hasComma = s.includes(",");
-  const hasColWord = /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
   const words = s.split(/\s+/).filter(Boolean);
 
-  // "Hidalgo" (1 palabra sin número) => NO
+  // Si empieza con "colonia" o "col." y no trae número/coma => colonia, NO dirección
+  if (/^(colonia|col\.)\b/.test(lower) && !hasNumber && !hasComma) return false;
+
+  // Una sola palabra sin número: NO dirección
   if (words.length === 1 && !hasNumber) return false;
 
-  // Si trae coma o número o palabra colonia => sí parece dirección
-  if (hasComma || hasNumber || hasColWord) return true;
+  // Señales fuertes de dirección
+  if (hasNumber || hasComma) return true;
 
-  // Si trae 2+ palabras, pero muy corto, igual no
-  if (words.length >= 2 && s.length >= 10) return true;
+  // Palabras típicas de calle
+  const hasStreetWord =
+    /\b(calle|av\.?|avenida|andador|calz\.?|calzada|priv\.?|privada|blvd|boulevard|carretera|km)\b/.test(lower);
 
+  if (hasStreetWord) return true;
+
+  // "Centro" / "Fracc ..." sin número NO es dirección
   return false;
 }
 
@@ -58,106 +69,146 @@ function confirmColonia(col, seed) {
   return `Perfecto, entonces es *${col}*. ¿Correcto?`;
 }
 
+function normalizeColoniaText(txt) {
+  // "Colonia Centro" -> "Centro"
+  return String(txt || "")
+    .trim()
+    .replace(/^(colonia|col\.)\s+/i, "")
+    .trim();
+}
+
 async function handle({ session, inbound, send, updateSession, closeSession }) {
   const step = Number(session.step || 1);
   const data = session.data || {};
   const phoneE164 = session.phone_e164 || inbound.phoneE164;
 
-  // STEP 1: dirección/colonia
-if (step === 1) {
-  const txt = String(inbound.text || "").trim();
+  // STEP 1: colonia+dirección (o colonia sola)
+  if (step === 1) {
+    const txt = String(inbound.text || "").trim();
 
-  if (!hasMinLen(txt, 3)) {
-    await send(intro(phoneE164));
-    return;
-  }
-
-  // ✅ Si NO parece dirección, intenta match de colonia directo
-  if (!looksLikeAddress(txt)) {
-    const matchCol = await findColoniaMatch(txt);
-
-    if (matchCol?.found && matchCol?.match) {
-      const nextData = {
-        ...data,
-        colonia_input: txt,
-        colonia: matchCol.match.colonia,
-        cobertura: matchCol.match.cobertura,
-        zona: matchCol.match.zona || null,
-        colonia_confirmed: true // ya la dijo explícitamente
-      };
-
-      // pide calle + número
-      await updateSession({ step: 11, data: nextData });
-      await send(`Perfecto ✅ Entonces estás en *${nextData.colonia}*.\n¿Me pasas tu *calle y número*?`);
+    if (!hasMinLen(txt, 3)) {
+      await send(intro(phoneE164));
       return;
     }
 
-    // si no matchea colonia, sí pide más detalle
-    await send(askColoniaMoreDetail(phoneE164));
-    return;
-  }
+    // ✅ Caso colonia sola (NO dirección)
+    if (!looksLikeAddress(txt)) {
+      const coloniaOnly = normalizeColoniaText(txt);
+      const matchCol = await findColoniaMatch(coloniaOnly);
 
-  // ... tu lógica actual (extractColoniaHint + findColoniaMatch)
-}
-// STEP 11: ya tenemos colonia, ahora pedimos calle + número
-if (step === 11) {
-  const txt = String(inbound.text || "").trim();
+      if (matchCol?.found && matchCol?.match) {
+        const nextData = {
+          ...data,
+          colonia_input: coloniaOnly,
+          colonia: matchCol.match.colonia,
+          cobertura: matchCol.match.cobertura,
+          zona: matchCol.match.zona || null,
+          colonia_confirmed: true
+        };
 
-  // si solo pone otra colonia por error, lo reinterpreto
-  const maybeCol = await findColoniaMatch(txt);
-  if (maybeCol?.found && maybeCol?.match && !/\d/.test(txt)) {
+        await updateSession({ step: 11, data: nextData });
+        await send(
+          `Perfecto ✅ Entonces estás en *${nextData.colonia}*.\n¿Me pasas tu *calle y número*?`
+        );
+        return;
+      }
+
+      await send(askColoniaMoreDetail(phoneE164));
+      return;
+    }
+
+    // ✅ Si SÍ parece dirección, intenta extraer colonia por LLM + match cobertura
+    const hint = await extractColoniaHint(txt);
+    const guess = String(hint?.colonia_norm_guess || "").trim();
+    const coloniaCandidate = normalizeColoniaText(guess || txt);
+
+    const match = await findColoniaMatch(coloniaCandidate);
+
+    if (!match?.found || !match?.match) {
+      await send(askColoniaMoreDetail(phoneE164));
+      return;
+    }
+
     const nextData = {
       ...data,
-      colonia_input: txt,
-      colonia: maybeCol.match.colonia,
-      cobertura: maybeCol.match.cobertura,
-      zona: maybeCol.match.zona || null,
-      colonia_confirmed: true
+      colonia_input: coloniaCandidate,
+      colonia: match.match.colonia,
+      cobertura: match.match.cobertura,
+      zona: match.match.zona || null,
+      direccion_input: txt,
+      colonia_confirmed: false
     };
-    await updateSession({ step: 11, data: nextData });
-    await send(`Va ✅ Colonia *${nextData.colonia}*. ¿Me pasas tu *calle y número*?`);
+
+    await updateSession({ step: 10, data: nextData });
+    await send(confirmColonia(nextData.colonia, phoneE164));
     return;
   }
 
-  if (!/\d/.test(txt) || txt.length < 5) {
-    await send(`¿Me lo mandas como *calle y número*? Ej: “Hidalgo 311” 🙂`);
+  // STEP 11: ya tenemos colonia, pedir calle + número
+  if (step === 11) {
+    const txt = String(inbound.text || "").trim();
+
+    // si manda otra colonia (sin número), reinterpreta colonia
+    const maybeCol = await findColoniaMatch(normalizeColoniaText(txt));
+    if (maybeCol?.found && maybeCol?.match && !/\d/.test(txt)) {
+      const nextData = {
+        ...data,
+        colonia_input: normalizeColoniaText(txt),
+        colonia: maybeCol.match.colonia,
+        cobertura: maybeCol.match.cobertura,
+        zona: maybeCol.match.zona || null,
+        colonia_confirmed: true
+      };
+      await updateSession({ step: 11, data: nextData });
+      await send(`Va ✅ Colonia *${nextData.colonia}*. ¿Me pasas tu *calle y número*?`);
+      return;
+    }
+
+    if (!/\d/.test(txt) || txt.length < 5) {
+      await send(`¿Me lo mandas como *calle y número*? Ej: “Hidalgo 311” 🙂`);
+      return;
+    }
+
+    const nextData = { ...data, calle_numero: txt };
+
+    // sin cobertura
+    if (String(nextData.cobertura || "").toUpperCase() === "NO") {
+      await updateSession({ step: 99, data: nextData });
+      await send(
+        `Gracias. Por ahora *no tenemos cobertura* en *${nextData.colonia}*.\n` +
+        "Si gustas, dime tu *nombre* y un *teléfono de contacto* y te avisamos cuando llegue 🙏"
+      );
+      return;
+    }
+
+    await updateSession({ step: 2, data: nextData });
+    await send("Excelente ✅ ¿Cuál es tu *nombre completo*?");
     return;
   }
-
-  const nextData = { ...data, calle_numero: txt };
-
-  // si NO hay cobertura (ya sabemos)
-  if (String(nextData.cobertura || "").toUpperCase() === "NO") {
-    await updateSession({ step: 99, data: nextData });
-    await send(
-      `Gracias. Por ahora *no tenemos cobertura* en *${nextData.colonia}*.\n` +
-      "Si gustas, dime tu *nombre* y un *teléfono de contacto* y te avisamos cuando llegue 🙏"
-    );
-    return;
-  }
-
-  await updateSession({ step: 2, data: nextData });
-  await send("Excelente ✅ ¿Cuál es tu *nombre completo*?");
-  return;
-}
 
   // STEP 10: confirmar colonia (sí/no)
   if (step === 10) {
     const t = String(inbound.text || "").trim().toLowerCase();
 
     const isYes = /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(t);
-    const isNo  = /(no|nel|incorrecto|equivocado|error)/i.test(t);
+    const isNo = /(no|nel|incorrecto|equivocado|error)/i.test(t);
 
     if (isYes) {
       const confirmedData = { ...data, colonia_confirmed: true };
 
-      // sin cobertura
       if (String(confirmedData.cobertura || "").toUpperCase() === "NO") {
         await updateSession({ step: 99, data: confirmedData });
         await send(
           `Gracias. Por ahora *no tenemos cobertura* en *${confirmedData.colonia}*.\n` +
           "Si gustas, dime tu *nombre* y un *teléfono* y te avisamos cuando llegue 🙏"
         );
+        return;
+      }
+
+      // ✅ aquí podrías pedir calle+número si no lo tienes
+      if (!confirmedData.calle_numero) {
+        await updateSession({ step: 11, data: confirmedData });
+        await send("Perfecto ✅ ¿Me pasas tu *calle y número*? Ej: “Hidalgo 311”");
         return;
       }
 
@@ -172,7 +223,6 @@ if (step === 11) {
       return;
     }
 
-    // Si mandan otra dirección (no dicen sí/no), regresamos a step 1 pero sin loop agresivo
     await updateSession({ step: 1, data: { ...data, colonia_confirmed: false } });
     await send("Perfecto. Pásame por favor *colonia, calle y número* (Ej: Morelos, Hidalgo 123).");
     return;
