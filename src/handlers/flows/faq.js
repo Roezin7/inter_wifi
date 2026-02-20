@@ -1,33 +1,29 @@
+// src/handlers/flows/faq.js
 const { matchFaq } = require("../../services/faqService");
 
 function intro() {
-  return (
-    "¡Claro! 🙂\n" +
-    "Dime tu duda (horarios, precios, ubicación, etc.)"
-  );
+  return "¡Claro! 🙂 ¿Qué duda tienes? (horarios, ubicación, pagos, precios, etc.)";
 }
 
 async function handle({ session, inbound, send, closeSession }) {
   const threshold = Number(process.env.FAQ_MATCH_THRESHOLD || 0.7);
+  const text = String(inbound.text || "").trim();
 
-  const m = await matchFaq(inbound.text, threshold);
-  if (m.matched) {
+  const m = await matchFaq(text, threshold);
+
+  if (m?.matched && m?.faq?.answer) {
     await send(m.faq.answer);
     await closeSession(session.session_id);
     return;
   }
 
-  // fallback sin LLM: respuesta genérica útil
+  // ✅ NO lista rígida; 1 pregunta natural
   await send(
-    "Te ayudo con eso 🙂\n" +
-      "¿Tu duda es sobre:\n" +
-      "1) Contratar servicio\n" +
-      "2) Reportar falla\n" +
-      "3) Registrar pago\n" +
-      "4) Horarios/ubicación/precios\n\n" +
-      "Respóndeme con el número."
+    "Te ayudo con gusto 🙂\n" +
+    "¿Tu duda es sobre *horarios*, *ubicación* o *formas de pago*?"
   );
 
+  // cerramos para no “atorar” el chat en FAQ si el usuario cambia de tema
   await closeSession(session.session_id);
 }
 
