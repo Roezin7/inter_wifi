@@ -47,21 +47,19 @@ function mapNumberToIntent(text) {
 }
 
 async function handleInbound({ inbound, send }) {
-  // 1) Log inbound siempre (con provider_msg_id para dedupe real)
-  const inserted = await insertWaMessage({
-    sessionId: null,
-    phoneE164: inbound.phoneE164,
-    direction: "IN",
-    body: inbound.text || "",
-    media: inbound.media,
-    raw: inbound.raw,
-    providerMsgId: inbound.providerMsgId // ✅
-  });
+// 1) Log inbound siempre (pero dedupea por providerMsgId)
+const inserted = await insertWaMessage({
+  sessionId: null,
+  phoneE164: inbound.phoneE164,
+  direction: "IN",
+  body: inbound.text || "",
+  media: inbound.media,
+  raw: inbound.raw,
+  providerMsgId: inbound.providerMsgId
+});
 
-  // Si ya existía (dedupe), NO proceses otra vez
-  if (inbound.providerMsgId && inserted === null) {
-    return;
-  }
+// si no insertó => ya procesado
+if (!inserted && inbound.providerMsgId) return;
 
   const existing = await getOpenSessionByPhone(inbound.phoneE164);
 
