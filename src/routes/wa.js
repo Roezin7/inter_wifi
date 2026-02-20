@@ -1,6 +1,6 @@
 const express = require("express");
 const { sendText } = require("../services/wasenderService");
-const { normalizeToE164 } = require("../utils/phoneUtils");
+const { normalizeToE164 } = require("../../utils/phoneUtils");
 const { insertWaMessage } = require("../services/messagesService");
 
 const router = express.Router();

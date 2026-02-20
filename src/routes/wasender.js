@@ -1,5 +1,5 @@
 const express = require("express");
-const { verifySecret } = require("../utils/waSecurity");
+const { verifySecret } = require("../../utils/waSecurity");
 const {
   isFromMe,
   extractSession,
@@ -8,11 +8,11 @@ const {
   extractProfileName,
   extractMedia,
   normalizePhoneToE164
-} = require("../utils/waPayload");
+} = require("../../utils/waPayload");
 
 const { sendText } = require("../services/wasenderService");
 const { handleInbound, menu } = require("../handlers/inbound");
-const { logger } = require("../utils/logger");
+const { logger } = require("../../utils/logger");
 
 const router = express.Router();
 
@@ -20,6 +20,9 @@ const router = express.Router();
  * POST /wasender/webhook
  */
 router.post("/webhook", async (req, res) => {
+  console.log("=== INBOUND WEBHOOK ===");
+console.log("HEADERS:", req.headers);
+console.log("BODY:", JSON.stringify(req.body, null, 2));
   try {
     if (!verifySecret(req)) return res.status(403).send("Forbidden");
 

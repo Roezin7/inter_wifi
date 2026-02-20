@@ -1,5 +1,5 @@
 const { z } = require("zod");
-const { norm } = require("../utils/textUtils");
+const { norm } = require("../../utils/textUtils");
 
 function mustEnv(name) {
   const v = process.env[name];

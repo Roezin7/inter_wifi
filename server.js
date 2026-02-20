@@ -6,7 +6,7 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 
-const { runMigrations } = require("./db");
+const { runMigrations } = require("./src/db");
 const wasenderRouter = require("./src/routes/wasender");
 const waRouter = require("./src/routes/wa");
 const { logger } = require("./utils/logger");
