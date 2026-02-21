@@ -21,9 +21,7 @@ function buildFallaResumenMsg({ folio }) {
     `1) Si no tiene internet, asegúrese que el módem esté conectado correctamente y con luz.\n` +
     `2) Si está bien conectado y aún no hay servicio, desconéctelo 30 segundos y vuelva a conectarlo.\n` +
     `3) Si no se restablece, envíe mensaje con su folio.\n` +
-    `4) Por ningún motivo oprima el botón de *Reset* del router.\n\n` +
-    `📲 Vía WhatsApp: *(475) 958 2328*\n` +
-    `🕘 De *Lunes a Sábado* 8:30am a 8:30pm`
+    `4) Por ningún motivo oprima el botón de *Reset* del router.\n\n`
   );
 }
 
