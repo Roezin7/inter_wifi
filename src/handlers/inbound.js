@@ -342,19 +342,24 @@ async function handleInbound({ inbound, send }) {
     // (evita conflicto con FAQ u otros sub-menús)
     const menuMode = Boolean(existing?.data?.menu_mode);
 
-    if (choice && menuMode) {
-      await closeSession(existing.session_id, client, "switch_flow");
-      const newSession = await createSession({ phoneE164: inbound.phoneE164, flow: choice, step: 1, data: { menu_mode: false } }, client);
-      await client.query("COMMIT");
-      await sendAndLog({
-        sessionId: newSession.session_id,
-        flow: choice,
-        step: 1,
-        kind: "switch_flow_by_number_menu_mode",
-        text: getIntro(choice, inbound)
-      });
-      return;
-    }
+// ✅ números 1-4 con sesión abierta
+if (choice) {
+  if (String(existing.flow || "").toUpperCase() === "FAQ") {
+    // NO cambies flow, el FAQ submenú lo procesa dentro del handler
+  } else {
+    await closeSession(existing.session_id, client, "switch_flow");
+    const newSession = await createSession({ phoneE164: inbound.phoneE164, flow: choice, step: 1, data: {} }, client);
+    await client.query("COMMIT");
+    await sendAndLog({
+      sessionId: newSession.session_id,
+      flow: choice,
+      step: 1,
+      kind: "switch_flow_by_number",
+      text: getIntro(choice, inbound)
+    });
+    return;
+  }
+}
 
     // si mandó un número pero NO está en menu_mode, no cambies de flow
     // (esto previene que "1" dentro de FAQ se convierta en CONTRATO)

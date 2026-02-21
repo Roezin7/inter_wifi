@@ -5,96 +5,107 @@ function norm(s) {
   return String(s || "")
     .toLowerCase()
     .trim()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
     .replace(/\s+/g, " ");
 }
 
-function detectCategory(textNorm) {
-  // categorías que YA tienes: "info" y "pagos"
-  // (puedes agregar "precios" etc cuando exista en DB)
-  if (/(pago|pagu|deposit|dep[oó]sit|transfer|comprobante|ticket|recibo|oxxo|spin|azteca|tarjeta|credito|d[eé]bito|vencim|corte)/i.test(textNorm)) {
-    return "pagos";
+function tokenize(s) {
+  const t = norm(s);
+  if (!t) return [];
+  return t.split(" ").filter(Boolean);
+}
+
+function jaccard(aTokens, bTokens) {
+  const A = new Set(aTokens);
+  const B = new Set(bTokens);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+  const union = A.size + B.size - inter;
+  return union ? inter / union : 0;
+}
+
+function keywordHitScore(textNorm, keywords) {
+  if (!keywords || !Array.isArray(keywords) || keywords.length === 0) return 0;
+
+  let hits = 0;
+  for (const k of keywords) {
+    const kk = norm(k);
+    if (!kk) continue;
+    // hit por substring o por match de palabra
+    if (textNorm.includes(kk)) hits++;
   }
-  if (/(ubic|direc|donde|mapa|lleg|horario|abren|cierran|oficina|atenci)/i.test(textNorm)) {
-    return "info";
-  }
-  return null;
+  return hits / Math.max(1, keywords.length);
 }
 
 /**
  * matchFaq:
- * - intenta match por keywords (rápido y súper confiable)
- * - si no, intenta trigram similarity en question
+ * - trae FAQs activas
+ * - calcula score compuesto:
+ *   score = 0.55*keywordScore + 0.45*jaccard(questionTokens, inputTokens)
+ * - si score >= threshold => matched
  */
-async function matchFaq(userText, opts = {}) {
-  const limit = Number(opts.limit || 5);
-  const threshold = Number(opts.threshold || 0.25); // trigram threshold (0.2-0.35 suele ir bien)
-  const t = norm(userText);
-  if (!t) return { matched: false };
+async function matchFaq(userText, threshold = 0.62) {
+  const textNorm = norm(userText);
+  const tokens = tokenize(userText);
 
-  const category = opts.category || detectCategory(t);
-
-  // 1) KEYWORDS MATCH (determinístico)
-  // keywords es text[] => buscamos si el mensaje contiene alguno
-  // ordenamos por:
-  // - cantidad de keywords pegadas (desc)
-  // - priority (desc)
-  // - updated_at (desc)
-  const kwSql = `
-    WITH c AS (
-      SELECT
-        id, question, answer, category, keywords, active, priority, updated_at,
-        (
-          SELECT COUNT(*)
-          FROM unnest(keywords) k
-          WHERE $1 LIKE ('%' || lower(k) || '%')
-        ) AS kw_hits
-      FROM wa_faqs
-      WHERE active = true
-        AND ( $2::text IS NULL OR category = $2::text )
-    )
-    SELECT *
-    FROM c
-    WHERE kw_hits > 0
-    ORDER BY kw_hits DESC, priority DESC, updated_at DESC
-    LIMIT $3
-  `;
-
-  const kwRes = await query(kwSql, [t, category, limit]);
-  if (kwRes.rows?.length) {
-    const top = kwRes.rows[0];
-    return {
-      matched: true,
-      reason: "keywords",
-      score: Number(top.kw_hits || 0),
-      faq: top
-    };
+  if (!textNorm) {
+    return { matched: false, score: 0, faq: null };
   }
 
-  // 2) TRGM MATCH (backup)
-  const trgmSql = `
-    SELECT
-      id, question, answer, category, keywords, active, priority, updated_at,
-      similarity(lower(question), $1) AS sim
+  // Traemos un set acotado (activas) ordenadas por prioridad (para desempate)
+  const { rows } = await query(
+    `
+    SELECT id, question, answer, category, keywords, priority
     FROM wa_faqs
     WHERE active = true
-      AND ( $2::text IS NULL OR category = $2::text )
-    ORDER BY sim DESC, priority DESC, updated_at DESC
-    LIMIT $3
-  `;
-  const triRes = await query(trgmSql, [t, category, limit]);
-  const top = triRes.rows?.[0];
+    ORDER BY priority DESC, id ASC
+    `
+  );
 
-  if (top && Number(top.sim || 0) >= threshold) {
-    return {
-      matched: true,
-      reason: "trgm",
-      score: Number(top.sim || 0),
-      faq: top
-    };
+  if (!rows?.length) {
+    return { matched: false, score: 0, faq: null };
   }
 
-  return { matched: false, reason: "no_match", category };
+  let best = null;
+
+  for (const f of rows) {
+    const qTokens = tokenize(f.question);
+    const jac = jaccard(tokens, qTokens);            // 0..1
+    const key = keywordHitScore(textNorm, f.keywords); // 0..1
+
+    const score = (0.55 * key) + (0.45 * jac);
+
+    if (!best || score > best.score) {
+      best = { score, faq: f };
+    }
+  }
+
+  if (!best) return { matched: false, score: 0, faq: null };
+
+  const matched = best.score >= threshold;
+
+  return {
+    matched,
+    score: Number(best.score.toFixed(4)),
+    faq: matched ? best.faq : null
+  };
 }
 
-module.exports = { matchFaq };
+async function getFaqById(id) {
+  const { rows } = await query(
+    `
+    SELECT id, question, answer, category, keywords, priority, active
+    FROM wa_faqs
+    WHERE id = $1
+    LIMIT 1
+    `,
+    [id]
+  );
+  return rows[0] || null;
+}
+
+module.exports = {
+  matchFaq,
+  getFaqById
+};
