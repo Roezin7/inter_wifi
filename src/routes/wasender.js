@@ -6,9 +6,8 @@ const {
   extractSession,
   extractFromRaw,
   extractProfileName,
-  extractMedia,
   normalizePhoneToE164,
-  extractText
+  extractText,
 } = require("../utils/waPayload");
 
 const { sendText } = require("../services/wasenderService");
@@ -23,7 +22,6 @@ const router = express.Router();
  */
 function getProviderMsgId(payload) {
   try {
-    // 1) formatos comunes directos
     const direct =
       payload?.providerMsgId ||
       payload?.messageId ||
@@ -33,41 +31,20 @@ function getProviderMsgId(payload) {
 
     if (direct) return String(direct);
 
-    // 2) messages puede ser array u objeto
     const msgs = payload?.data?.messages;
 
-    // array
     if (Array.isArray(msgs) && msgs.length) {
       const m0 = msgs[0];
-      const id =
-        m0?.id ||
-        m0?.key?.id ||
-        m0?.messageId ||
-        m0?.message_id ||
-        m0?.msgId ||
-        null;
+      const id = m0?.id || m0?.key?.id || m0?.messageId || m0?.message_id || m0?.msgId || null;
       if (id) return String(id);
     }
 
-    // objeto
     if (msgs && typeof msgs === "object") {
-      const id =
-        msgs?.id ||
-        msgs?.key?.id ||
-        msgs?.messageId ||
-        msgs?.message_id ||
-        msgs?.msgId ||
-        null;
+      const id = msgs?.id || msgs?.key?.id || msgs?.messageId || msgs?.message_id || msgs?.msgId || null;
       if (id) return String(id);
     }
 
-    // 3) backups raros
-    const alt =
-      payload?.data?.key?.id ||
-      payload?.data?.id ||
-      payload?.data?.messageId ||
-      null;
-
+    const alt = payload?.data?.key?.id || payload?.data?.id || payload?.data?.messageId || null;
     return alt ? String(alt) : null;
   } catch {
     return null;
@@ -85,7 +62,6 @@ function safeExtractText(payload) {
 
   const msgs = payload?.data?.messages;
 
-  // array
   if (Array.isArray(msgs) && msgs.length) {
     const m0 = msgs[0];
     return (
@@ -97,7 +73,6 @@ function safeExtractText(payload) {
     );
   }
 
-  // objeto
   return (
     payload?.data?.messages?.messageBody ||
     payload?.data?.messages?.message?.conversation ||
@@ -110,53 +85,136 @@ function safeExtractText(payload) {
 }
 
 /**
+ * ✅ Extrae 1 media "raw" desde payload Wasender:
+ * payload.data.messages.message.{imageMessage|documentMessage|videoMessage|audioMessage|stickerMessage}
+ */
+function extractWasenderMedia(payload) {
+  const msg = payload?.data?.messages?.message;
+
+  if (!msg || typeof msg !== "object") return null;
+
+  if (msg.imageMessage) return { ...msg.imageMessage, _type: "image" };
+  if (msg.documentMessage) return { ...msg.documentMessage, _type: "document" };
+  if (msg.videoMessage) return { ...msg.videoMessage, _type: "video" };
+  if (msg.audioMessage) return { ...msg.audioMessage, _type: "audio" };
+  if (msg.stickerMessage) return { ...msg.stickerMessage, _type: "sticker" };
+
+  return null;
+}
+
+/**
  * ✅ Normaliza media al formato que tu bot usa:
- * inbound.media.urls[] y inbound.media.count
+ * inbound.media.urls[] + inbound.media.count
+ * y además conserva inbound.media.items[] con meta (mediaKey/mimetype/id...)
  */
 function normalizeInboundMedia(media) {
-  if (!media) return { urls: [], count: 0 };
+  const out = { urls: [], count: 0, items: [] };
+  if (!media) return out;
 
-  // si ya viene como { urls, count }
+  // Legacy: ya viene como { urls, count } (y tal vez items)
   if (Array.isArray(media.urls)) {
-    return {
-      urls: media.urls.filter(Boolean).map(String),
-      count: Number(media.count || media.urls.length || 0)
-    };
+    out.urls = media.urls.filter(Boolean).map(String);
+    out.count = Number(media.count || out.urls.length || 0);
+    if (Array.isArray(media.items)) out.items = media.items;
+    return out;
   }
 
-  // si viene como { url }
-  if (media.url) {
-    return { urls: [String(media.url)], count: 1 };
+  // Wasender raw: { url, mediaKey, mimetype, fileName... }
+  const url = media.url || media.href || media.link || null;
+  if (url) {
+    out.urls = [String(url)];
+    out.count = 1;
+    out.items = [
+      {
+        url: String(url),
+        id: media.id || media.mediaId || media.messageId || null,
+        mimetype: media.mimetype || media.mimeType || null,
+        mediaKey: media.mediaKey || null,
+        fileName: media.fileName || null,
+        fileLength: media.fileLength || null,
+        sha256: media.fileSha256 || media.sha256 || null,
+        type: media._type || null,
+      },
+    ];
+    return out;
   }
 
-  // si viene como array
+  // Array de medias
   if (Array.isArray(media)) {
-    const urls = media
-      .map((m) => m?.url || m?.href || m?.link || m)
-      .filter(Boolean)
-      .map(String);
-    return { urls, count: urls.length };
+    const items = media
+      .map((m) => {
+        const u = m?.url || m?.href || m?.link || null;
+        if (!u) return null;
+        return {
+          url: String(u),
+          id: m?.id || m?.mediaId || m?.messageId || null,
+          mimetype: m?.mimetype || m?.mimeType || null,
+          mediaKey: m?.mediaKey || null,
+          fileName: m?.fileName || null,
+          fileLength: m?.fileLength || null,
+          sha256: m?.fileSha256 || m?.sha256 || null,
+          type: m?._type || null,
+        };
+      })
+      .filter(Boolean);
+
+    out.items = items;
+    out.urls = items.map((x) => x.url);
+    out.count = out.urls.length;
+    return out;
   }
 
-  // si viene como { media: [...] }
+  // { media: [...] }
   if (Array.isArray(media.media)) {
-    const urls = media.media
-      .map((m) => m?.url || m?.href || m?.link || m)
-      .filter(Boolean)
-      .map(String);
-    return { urls, count: urls.length };
+    return normalizeInboundMedia(media.media);
   }
 
-  return { urls: [], count: 0 };
+  return out;
+}
+
+/**
+ * ✅ Debug seguro: recorta payload para logs
+ * (evita logs gigantes y filtra cosas obvias)
+ */
+function safePayloadPreview(payload) {
+  try {
+    const p = payload || {};
+    const msg = p?.data?.messages?.message || null;
+    const key = p?.data?.messages?.key || null;
+
+    // Preview chico
+    return {
+      event: p?.event || null,
+      fromMe: !!isFromMe(p),
+      hasData: !!p?.data,
+      key: key
+        ? {
+            id: key?.id,
+            remoteJid: key?.remoteJid,
+            cleanedSenderPn: key?.cleanedSenderPn,
+            cleanedParticipantPn: key?.cleanedParticipantPn,
+          }
+        : null,
+      messageBody: p?.data?.messages?.messageBody || null,
+      mediaKinds: {
+        image: !!msg?.imageMessage,
+        document: !!msg?.documentMessage,
+        video: !!msg?.videoMessage,
+        audio: !!msg?.audioMessage,
+        sticker: !!msg?.stickerMessage,
+      },
+    };
+  } catch {
+    return { note: "preview_failed" };
+  }
 }
 
 router.post("/webhook", async (req, res) => {
-  // ✅ SIEMPRE responder 200 rápido para que el proveedor no reintente por timeout.
-  // (Tu dedupe real vive en insertWaMessage / provider_dedupe_key)
+  // ✅ SIEMPRE responder 200 rápido
   res.status(200).json({ ok: true });
 
   try {
-    if (!verifySecret(req)) return; // ya respondimos
+    if (!verifySecret(req)) return;
 
     const payload = req.body || {};
 
@@ -166,6 +224,15 @@ router.post("/webhook", async (req, res) => {
     // Ignora mensajes que tú mismo enviaste
     if (isFromMe(payload)) return;
 
+    // ✅ DEBUG: payload preview + media crudo
+    console.log("[WASENDER] payload.preview =", JSON.stringify(safePayloadPreview(payload), null, 2));
+
+    const rawMedia = extractWasenderMedia(payload);
+    if (rawMedia) {
+      console.log("[WASENDER] rawMedia.type =", rawMedia?._type || null);
+      console.log("[WASENDER] rawMedia =", JSON.stringify(rawMedia, null, 2));
+    }
+
     const providerMsgId = getProviderMsgId(payload);
 
     const providerSession = extractSession(payload);
@@ -174,7 +241,8 @@ router.post("/webhook", async (req, res) => {
     if (!phoneE164) return;
 
     const profileName = extractProfileName(payload);
-    const rawMedia = extractMedia(payload);
+
+    // ✅ Usa media desde payload (con mediaKey/mimetype)
     const media = normalizeInboundMedia(rawMedia);
 
     const inboundText = String(safeExtractText(payload) || "").trim();
@@ -195,15 +263,14 @@ router.post("/webhook", async (req, res) => {
         profileName,
         text: inboundText,
         media,
-        raw: payload,
+        raw: payload, // ✅ aquí está el payload completo si lo ocupas en flows
         providerSession,
-        providerMsgId
+        providerMsgId,
       },
-      send
+      send,
     });
   } catch (err) {
     logger?.error?.("Webhook error", err);
-    // ya respondimos 200 arriba, no rethrow
   }
 });
 
