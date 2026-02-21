@@ -10,6 +10,7 @@
     "start": "node server.js"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.995.0",
     "axios": "^1.13.5",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
