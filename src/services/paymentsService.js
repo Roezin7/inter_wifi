@@ -16,10 +16,7 @@ async function createPayment(payload) {
   const r = await query(
     `insert into payments (
         folio, phone_e164, nombre, mes, monto,
-        comprobante_url,
-        comprobante_media_id,
-        comprobante_mime,
-        comprobante_public_url
+        comprobante_url, comprobante_media_id, comprobante_mime, comprobante_public_url
      )
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      returning *`,
@@ -29,7 +26,6 @@ async function createPayment(payload) {
       payload.nombre || null,
       payload.mes || null,
       payload.monto || null,
-
       payload.comprobante_url || null,
       payload.comprobante_media_id || null,
       payload.comprobante_mime || null,

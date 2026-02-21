@@ -1,99 +1,132 @@
 // src/services/mediaService.js
-const axios = require("axios");
+const crypto = require("crypto");
+const fetch = require("node-fetch");
+const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
-// Idealmente apunta a tu storage (S3/R2/Cloudinary)
-// Aquí lo dejo como stub: si no configuras, simplemente no convierte nada.
-const ENABLE_MEDIA_STORAGE = String(process.env.ENABLE_MEDIA_STORAGE || "false") === "true";
+// ==============
+// R2 (S3 compat)
+// ==============
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET = process.env.R2_BUCKET;
+const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE; // ej: https://cdn.tudominio.com o https://pub-xxx.r2.dev
 
-/**
- * Ajusta este downloader a tu proveedor (Wasender).
- * La idea:
- *  - Si tienes mediaId, llamas el endpoint del proveedor para descargar binario
- *  - Regresas { buffer, contentType, filename }
- */
-async function downloadFromProvider({ mediaId, mime }) {
-  // ⚠️ TODO: AJUSTAR a tu API real (Wasender)
-  // Ejemplo hipotético:
-  // GET `${WASENDER_BASE}/media/${mediaId}` con Authorization Bearer
-  //
-  // Si tu proveedor NO da mediaId, no podrás descargar aquí.
+const r2 =
+  R2_ACCOUNT_ID &&
+  R2_ACCESS_KEY_ID &&
+  R2_SECRET_ACCESS_KEY &&
+  R2_BUCKET &&
+  R2_PUBLIC_BASE
+    ? new S3Client({
+        region: "auto",
+        endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+        credentials: {
+          accessKeyId: R2_ACCESS_KEY_ID,
+          secretAccessKey: R2_SECRET_ACCESS_KEY,
+        },
+      })
+    : null;
 
-  const WASENDER_BASE = process.env.WASENDER_BASE_URL;
-  const WASENDER_TOKEN = process.env.WASENDER_TOKEN;
+// ==============
+// WASENDER
+// ==============
+const WASENDER_BASE_URL = process.env.WASENDER_BASE_URL; // ej: https://wasenderapi.com/api
+const WASENDER_API_KEY = process.env.WASENDER_API_KEY; // tu key/token
 
-  if (!WASENDER_BASE || !WASENDER_TOKEN) {
-    throw new Error("WASENDER_BASE_URL / WASENDER_TOKEN missing for media download");
-  }
-  if (!mediaId) {
-    throw new Error("mediaId missing (cannot download media)");
-  }
+function extFromMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  if (m.includes("pdf")) return "pdf";
+  if (m.includes("png")) return "png";
+  if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
+  if (m.includes("webp")) return "webp";
+  return "bin";
+}
 
-  // 👇 Ajusta endpoint real de descarga
-  const url = `${WASENDER_BASE}/media/${encodeURIComponent(mediaId)}`;
+function sha1(s) {
+  return crypto.createHash("sha1").update(String(s || "")).digest("hex").slice(0, 12);
+}
 
-  const res = await axios.get(url, {
-    responseType: "arraybuffer",
-    timeout: 30000,
+async function downloadFromWasender({ mediaId }) {
+  if (!WASENDER_BASE_URL || !WASENDER_API_KEY) return null;
+  if (!mediaId) return null;
+
+  // ⚠️ AJUSTA ESTE ENDPOINT A TU WASENDER REAL
+  // La idea es: que regrese binario del archivo
+  const url = `${WASENDER_BASE_URL}/media/${encodeURIComponent(mediaId)}/download`;
+
+  const res = await fetch(url, {
+    method: "GET",
     headers: {
-      Authorization: `Bearer ${WASENDER_TOKEN}`,
+      Authorization: `Bearer ${WASENDER_API_KEY}`,
     },
   });
 
-  const contentType = res.headers["content-type"] || mime || "application/octet-stream";
-  const buffer = Buffer.from(res.data);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Wasender media download failed: ${res.status} ${text?.slice(0, 200)}`);
+  }
 
-  // genera filename simple
-  const ext =
-    contentType.includes("pdf") ? "pdf" :
-    contentType.includes("jpeg") ? "jpg" :
-    contentType.includes("png") ? "png" :
-    "bin";
+  const contentType = res.headers.get("content-type") || "application/octet-stream";
+  const buf = Buffer.from(await res.arrayBuffer());
 
-  return { buffer, contentType, filename: `receipt_${Date.now()}.${ext}` };
+  return { buf, contentType };
+}
+
+async function uploadToR2({ key, buf, contentType }) {
+  if (!r2) return null;
+
+  await r2.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: buf,
+      ContentType: contentType,
+      CacheControl: "public, max-age=31536000, immutable",
+    })
+  );
+
+  // URL pública
+  const base = String(R2_PUBLIC_BASE).replace(/\/+$/, "");
+  return `${base}/${key}`;
 }
 
 /**
- * Sube a tu storage y regresa un URL público.
- * Aquí lo dejo como stub: tú lo conectas a S3/R2/Cloudinary.
- */
-async function uploadToStorage({ buffer, contentType, filename }) {
-  // ⚠️ TODO: implementar con tu storage real.
-  // Recomendación rápida:
-  // - Cloudflare R2 + public bucket, o
-  // - S3 + CloudFront, o
-  // - Cloudinary (si quieres fácil)
-
-  // Por ahora, devuelve null para no romper el flujo.
-  return null;
-}
-
-/**
- * Intento “best-effort”:
- * - Si no hay storage habilitado -> regresa null
- * - Si hay mediaId -> descarga binario -> sube a storage -> regresa publicUrl
+ * Intenta resolver la url pública del comprobante.
+ * - Si ya es una URL normal (jpg/pdf), la regresa
+ * - Si es .enc, intenta descargar por mediaId y subir a R2
  */
 async function resolveAndStoreMedia({ providerUrl, mediaId, mime, phoneE164, kind }) {
-  try {
-    if (!ENABLE_MEDIA_STORAGE) return null;
+  const url = String(providerUrl || "");
+  const isEnc = /\.enc(\?|$)/i.test(url);
 
-    // Si ya no es .enc, probablemente ya es usable:
-    if (providerUrl && !String(providerUrl).includes(".enc")) {
-      return { publicUrl: providerUrl };
-    }
-
-    // Si no hay mediaId no podemos descargar confiable
-    if (!mediaId) return null;
-
-    const file = await downloadFromProvider({ mediaId, mime });
-    const publicUrl = await uploadToStorage(file);
-
-    if (!publicUrl) return null;
-
-    return { publicUrl };
-  } catch (e) {
-    // No rompemos el flujo de pago por un problema de storage
-    return null;
+  // si ya es algo normal, no hacemos nada
+  if (url && !isEnc) {
+    return { publicUrl: url, contentType: mime || null, source: "as_is" };
   }
+
+  // si no hay mediaId, NO hay forma confiable de convertir .enc
+  if (!mediaId) {
+    return { publicUrl: null, contentType: mime || null, source: "no_media_id" };
+  }
+
+  // descarga binario
+  const dl = await downloadFromWasender({ mediaId });
+  if (!dl?.buf?.length) return { publicUrl: null, contentType: mime || null, source: "empty" };
+
+  const contentType = mime || dl.contentType || "application/octet-stream";
+  const ext = extFromMime(contentType);
+
+  const key = [
+    "uploads",
+    kind || "media",
+    new Date().toISOString().slice(0, 10),
+    `${sha1(phoneE164)}_${sha1(mediaId)}.${ext}`,
+  ].join("/");
+
+  const publicUrl = await uploadToR2({ key, buf: dl.buf, contentType });
+
+  return { publicUrl: publicUrl || null, contentType, source: publicUrl ? "r2" : "no_r2" };
 }
 
 module.exports = { resolveAndStoreMedia };
