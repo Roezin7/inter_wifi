@@ -42,8 +42,6 @@ async function notifyAdmin(text) {
 }
 
 function buildNewContractAdminMsg(c) {
-  // OJO: mantenlo CORTO para evitar fallos por tamaño.
-  // No metas urls gigantes si no es necesario.
   return (
     "📥 *Nueva solicitud de contratación*\n" +
     `Folio: *${c.folio}*\n` +
@@ -51,7 +49,9 @@ function buildNewContractAdminMsg(c) {
     `Colonia: ${c.colonia}\n` +
     `Dirección: ${c.calle_numero}\n` +
     `Tel: ${c.telefono_contacto}\n` +
-    `Cliente WA: ${c.phone_e164}\n`
+    `Cliente WA: ${c.phone_e164}\n` +
+    (c.ine_frente_url ? `INE Frente: ${c.ine_frente_url}\n` : "") +
+    (c.ine_reverso_url ? `INE Atrás: ${c.ine_reverso_url}\n` : "")
   );
 }
 
