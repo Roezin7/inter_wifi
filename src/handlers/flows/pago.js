@@ -4,7 +4,7 @@ const { extractFirstNumber } = require("../../utils/textUtils");
 const { createPayment } = require("../../services/paymentsService");
 const { notifyAdmin } = require("../../services/notifyService");
 const { parsePaymentMesMonto } = require("../../services/llmService");
-const { resolveAndStoreMedia } = require("../../services/mediaService");
+const { storeToR2 } = require("../../services/r2UploadService");
 
 // =====================
 // Copy / UX
@@ -72,6 +72,10 @@ async function safeParseMesMonto(text) {
   return { mes, monto };
 }
 
+/**
+ * ✅ Media del inbound normalizado en /routes/wasender.js
+ * inbound.media.items[0] trae: url, mimetype, mediaKey, id, etc.
+ */
 function pickMedia(inboundMedia) {
   const urls = inboundMedia?.urls || [];
   const items = inboundMedia?.items || [];
@@ -81,6 +85,9 @@ function pickMedia(inboundMedia) {
     url: first?.url || urls?.[0] || null,
     id: first?.id || inboundMedia?.id || null,
     mimetype: first?.mimetype || inboundMedia?.mimetype || null,
+    mediaKey: first?.mediaKey || null,
+    fileName: first?.fileName || null,
+    type: first?.type || null,
   };
 }
 
@@ -100,32 +107,44 @@ function buildAdminPaymentMsg(p) {
 }
 
 /**
- * Registra el pago AHORA (sin esperar otro inbound).
- * Esto evita que se quede colgado en step 4.
+ * ✅ Registra el pago AHORA (sin esperar otro inbound).
+ * - Si comprobante es .enc, storeToR2 lo desencripta usando mediaKey.
  */
 async function registerPaymentNow({ session, data, phoneE164 }) {
-  // intenta convertir .enc a public url (si tienes storage habilitado)
-  const stored = await resolveAndStoreMedia({
-    providerUrl: data.comprobante_url,
-    mediaId: data.comprobante_media_id,
-    mime: data.comprobante_mime,
-    phoneE164,
-    kind: "payment_receipt",
-  });
+  let comprobantePublicUrl = data.comprobante_public_url || null;
+  let comprobanteMime = data.comprobante_mime || null;
+
+  // Si tenemos comprobante_url + mediaKey, intentamos subirlo a R2
+  if (!comprobantePublicUrl && data.comprobante_url && data.comprobante_media_key) {
+    const uploaded = await storeToR2({
+      url: data.comprobante_url,
+      mediaKey: data.comprobante_media_key,
+      mimetype: data.comprobante_mime || "",
+      folder: "payments/receipts",
+      filenamePrefix: "comprobante",
+      phoneE164,
+    });
+
+    comprobantePublicUrl = uploaded?.publicUrl || null;
+    comprobanteMime = uploaded?.contentType || comprobanteMime;
+  }
 
   const p = await createPayment({
     phoneE164,
     nombre: data.nombre,
     mes: data.mes,
     monto: data.monto,
+
+    // auditoría/origen
     comprobante_url: data.comprobante_url || null,
     comprobante_media_id: data.comprobante_media_id || null,
-    comprobante_mime: data.comprobante_mime || null,
-    comprobante_public_url: stored?.publicUrl || null,
+    comprobante_mime: comprobanteMime || null,
+
+    // ✅ la buena
+    comprobante_public_url: comprobantePublicUrl || null,
   });
 
   await notifyAdmin(buildAdminPaymentMsg(p));
-
   return p;
 }
 
@@ -159,16 +178,38 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     // Si mandó comprobante primero
     if (hasMediaUrls(inbound.media)) {
       const m = pickMedia(inbound.media);
-      if (!m.url && !m.id) {
-        await send("No pude leer el comprobante 😅 ¿Me lo reenvías como *foto o PDF*?");
+
+      if (!m.url || !m.mediaKey) {
+        await send(
+          "No pude leer el comprobante 😅\n" +
+            "Reenvíalo como *foto o PDF* (no como archivo reenviado raro)."
+        );
+        return;
+      }
+
+      // ✅ Subimos de una vez a R2, así ya guardas la URL pública
+      let uploaded;
+      try {
+        uploaded = await storeToR2({
+          url: m.url,
+          mediaKey: m.mediaKey,
+          mimetype: m.mimetype || "",
+          folder: "payments/receipts",
+          filenamePrefix: "comprobante",
+          phoneE164,
+        });
+      } catch (e) {
+        await send("Tuve un tema guardando el comprobante 😅 ¿Me lo reenvías como *foto o PDF*?");
         return;
       }
 
       const next = {
         ...data,
-        comprobante_url: m.url || null,
+        comprobante_url: m.url, // origen (enc)
+        comprobante_public_url: uploaded?.publicUrl || null, // ✅ r2
         comprobante_media_id: m.id || null,
-        comprobante_mime: m.mimetype || null,
+        comprobante_media_key: m.mediaKey || null,
+        comprobante_mime: uploaded?.contentType || m.mimetype || null,
       };
 
       await updateSession({ step: 22, data: next });
@@ -226,8 +267,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   // STEP 25: confirmación
   if (step === 25) {
     if (looksLikeYes(txt)) {
-      // ✅ Si ya existe comprobante, registramos AHORA mismo (no esperar otro inbound)
-      const hasReceipt = !!(data.comprobante_url || data.comprobante_media_id);
+      const hasReceipt = !!(data.comprobante_public_url || data.comprobante_url);
 
       if (hasReceipt) {
         await send("Perfecto ✅ Estoy registrando tu pago…");
@@ -238,7 +278,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
           await send(`¡Gracias! ✅ Pago registrado.\nFolio: *${p.folio}*`);
           return;
         } catch (e) {
-          // No cierres sesión si falló, para que pueda reintentar
           await send(
             "Uy 😅 tuve un problema registrando el pago.\n" +
               "¿Me reenvías el comprobante y el mes/monto? (ej: *Enero 500*)"
@@ -248,15 +287,13 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         }
       }
 
-      // Si aún no hay comprobante, lo pedimos
       await updateSession({ step: 3, data });
       await send("Listo ✅ Envíame el *comprobante* (foto o PDF) 📎");
       return;
     }
 
     if (looksLikeNo(txt)) {
-      // si ya tenemos comprobante, regresamos a 22, si no a 2
-      const backStep = data.comprobante_url || data.comprobante_media_id ? 22 : 2;
+      const backStep = data.comprobante_url || data.comprobante_public_url ? 22 : 2;
       await updateSession({ step: backStep, data: { ...data, mes: null, monto: null } });
       await send("Va 🙂 corrígeme por favor. ¿De qué mes fue y cuánto pagaste? (ej: *Enero 500*)");
       return;
@@ -274,16 +311,37 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     const m = pickMedia(inbound.media);
-    if (!m.url && !m.id) {
-      await send("No pude leer el comprobante 😅 ¿Me lo reenvías como *foto o PDF*?");
+    if (!m.url || !m.mediaKey) {
+      await send(
+        "No pude leer el comprobante 😅\n" +
+          "Reenvíalo como *foto o PDF* (no como reenviado raro)."
+      );
+      return;
+    }
+
+    // ✅ Subimos a R2 aquí también
+    let uploaded;
+    try {
+      uploaded = await storeToR2({
+        url: m.url,
+        mediaKey: m.mediaKey,
+        mimetype: m.mimetype || "",
+        folder: "payments/receipts",
+        filenamePrefix: "comprobante",
+        phoneE164,
+      });
+    } catch (e) {
+      await send("Tuve un tema guardando el comprobante 😅 ¿Me lo reenvías como *foto o PDF*?");
       return;
     }
 
     const next = {
       ...data,
-      comprobante_url: m.url || null,
+      comprobante_url: m.url,
+      comprobante_public_url: uploaded?.publicUrl || null,
       comprobante_media_id: m.id || null,
-      comprobante_mime: m.mimetype || null,
+      comprobante_media_key: m.mediaKey || null,
+      comprobante_mime: uploaded?.contentType || m.mimetype || null,
     };
 
     await send("Perfecto ✅ Estoy registrando tu pago…");
