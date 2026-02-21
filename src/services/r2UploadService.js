@@ -61,6 +61,7 @@ function safePath(s) {
 }
 
 async function downloadFromWasender(mediaId) {
+
   if (!WASENDER_BASE_URL || !WASENDER_API_KEY) {
     throw new Error("WASender not configured (missing WASENDER_BASE_URL/WASENDER_API_KEY)");
   }
@@ -72,6 +73,8 @@ async function downloadFromWasender(mediaId) {
     method: "GET",
     headers: { Authorization: `Bearer ${WASENDER_API_KEY}` },
   });
+  console.log("WASENDER STATUS:", res.status);
+console.log("WASENDER HEADERS:", Object.fromEntries(res.headers.entries()));
 
   if (!res.ok) {
     const t = await res.text().catch(() => "");
@@ -79,8 +82,11 @@ async function downloadFromWasender(mediaId) {
   }
 
   const contentType = res.headers.get("content-type") || "application/octet-stream";
-  const buf = Buffer.from(await res.arrayBuffer());
+  const buf = Buffer.from(await res.arrayBuffer())
+
+
   return { buf, contentType };
+  
 }
 
 async function downloadFromUrl(url) {
