@@ -1,7 +1,20 @@
 // src/services/mediaService.js
 const crypto = require("crypto");
-const fetch = require("node-fetch");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+
+// =======================
+// FETCH (Node 18+ native)
+// =======================
+/**
+ * En Node 18+ (incluye Node 22) existe fetch global.
+ * Si algún día corres en Node viejo, te dará error explícito.
+ */
+const fetchFn = global.fetch;
+if (!fetchFn) {
+  throw new Error(
+    "mediaService: global.fetch is not available. Use Node 18+ (recommended) or add a fetch polyfill."
+  );
+}
 
 // ==============
 // R2 (S3 compat)
@@ -55,7 +68,7 @@ async function downloadFromWasender({ mediaId }) {
   // La idea es: que regrese binario del archivo
   const url = `${WASENDER_BASE_URL}/media/${encodeURIComponent(mediaId)}/download`;
 
-  const res = await fetch(url, {
+  const res = await fetchFn(url, {
     method: "GET",
     headers: {
       Authorization: `Bearer ${WASENDER_API_KEY}`,
