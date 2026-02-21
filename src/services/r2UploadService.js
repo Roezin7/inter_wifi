@@ -1,122 +1,113 @@
 // src/services/r2UploadService.js
 const crypto = require("crypto");
-const axios = require("axios");
-const path = require("path");
-
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
-// ====== Config R2 (S3-compatible) ======
-function requireEnv(name) {
-  const v = process.env[name];
-  if (!v) throw new Error(`Missing env: ${name}`);
-  return v;
+// ==============
+// R2 (S3 compat)
+// ==============
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
+const R2_BUCKET = process.env.R2_BUCKET;
+const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE; // ej: https://pub-xxxx.r2.dev o tu CDN
+
+function hasR2Env() {
+  return (
+    R2_ACCOUNT_ID &&
+    R2_ACCESS_KEY_ID &&
+    R2_SECRET_ACCESS_KEY &&
+    R2_BUCKET &&
+    R2_PUBLIC_BASE
+  );
 }
 
-const R2_ACCOUNT_ID = requireEnv("R2_ACCOUNT_ID");
-const R2_ACCESS_KEY_ID = requireEnv("R2_ACCESS_KEY_ID");
-const R2_SECRET_ACCESS_KEY = requireEnv("R2_SECRET_ACCESS_KEY");
-const R2_BUCKET = requireEnv("R2_BUCKET");
-const R2_PUBLIC_BASE = requireEnv("R2_PUBLIC_BASE"); // ej: https://pub-xxxx.r2.dev  o tu CDN
+const r2 = hasR2Env()
+  ? new S3Client({
+      region: "auto",
+      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
+      },
+    })
+  : null;
 
-const s3 = new S3Client({
-  region: "auto",
-  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: R2_ACCESS_KEY_ID,
-    secretAccessKey: R2_SECRET_ACCESS_KEY
-  }
-});
-
-// ====== Helpers ======
-function pickExtFromMime(mime = "") {
-  const m = String(mime).toLowerCase();
-  if (m.includes("jpeg") || m.includes("jpg")) return ".jpg";
-  if (m.includes("png")) return ".png";
-  if (m.includes("pdf")) return ".pdf";
-  if (m.includes("webp")) return ".webp";
-  return ""; // fallback
+function extFromMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  if (m.includes("pdf")) return "pdf";
+  if (m.includes("png")) return "png";
+  if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
+  if (m.includes("webp")) return "webp";
+  return "bin";
 }
 
-function pickExtFromUrl(url = "") {
-  try {
-    const u = new URL(url);
-    const ext = path.extname(u.pathname || "");
-    return ext && ext.length <= 6 ? ext : "";
-  } catch {
-    return "";
-  }
-}
-
-function safeName(s) {
+function safePath(s) {
   return String(s || "")
-    .trim()
     .toLowerCase()
-    .replace(/[^\w\-]+/g, "_")
-    .replace(/_+/g, "_")
-    .slice(0, 40);
+    .replace(/[^a-z0-9/_-]+/g, "_")
+    .replace(/\/{2,}/g, "/")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 120);
 }
 
-function ymd() {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+function sha1(s) {
+  return crypto.createHash("sha1").update(String(s || "")).digest("hex").slice(0, 12);
 }
 
-async function downloadBinary(url) {
-  // OJO: si tu proveedor requiere headers, aquí puedes agregarlos.
-  // En la mayoría de setups con WaSender, el link que llega ya es descargable.
-  const res = await axios.get(url, {
-    responseType: "arraybuffer",
-    timeout: 30_000,
-    maxContentLength: 20 * 1024 * 1024, // 20MB
-    maxBodyLength: 20 * 1024 * 1024
-  });
+async function fetchToBuffer(url) {
+  const res = await fetch(url);
+  if (!res.ok) {
+    const t = await res.text().catch(() => "");
+    throw new Error(`download failed ${res.status}: ${t.slice(0, 120)}`);
+  }
+  const contentType = res.headers.get("content-type") || "application/octet-stream";
+  const buf = Buffer.from(await res.arrayBuffer());
+  return { buf, contentType };
+}
 
-  const contentType = res.headers?.["content-type"] || "";
-  return {
-    buffer: Buffer.from(res.data),
-    contentType
-  };
+async function uploadBufferToR2({ key, buf, contentType }) {
+  if (!r2) throw new Error("R2 not configured (missing env vars)");
+
+  await r2.send(
+    new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: key,
+      Body: buf,
+      ContentType: contentType || "application/octet-stream",
+      CacheControl: "public, max-age=31536000, immutable",
+    })
+  );
+
+  const base = String(R2_PUBLIC_BASE).replace(/\/+$/, "");
+  return `${base}/${key}`;
 }
 
 /**
- * Sube un media a R2 y regresa URL pública
- * @param {Object} params
- * @param {string} params.url - url del provider (mmg/wasender)
- * @param {string} params.mimetype - mimetype reportado por inbound (opcional)
- * @param {string} params.folder - carpeta lógica (ej: "contracts/ine")
- * @param {string} params.filenamePrefix - prefijo del archivo (ej: "ine_frente")
- * @param {string} params.phoneE164 - para namespacing (opcional)
+ * storeToR2:
+ * - Descarga binario desde la URL (aunque sea .enc)
+ * - Sube a R2
+ * - Regresa URL pública
  */
 async function storeToR2({ url, mimetype, folder, filenamePrefix, phoneE164 }) {
   if (!url) throw new Error("storeToR2: missing url");
 
-  const { buffer, contentType } = await downloadBinary(url);
+  const dl = await fetchToBuffer(url);
 
-  const ext =
-    pickExtFromMime(mimetype) ||
-    pickExtFromMime(contentType) ||
-    pickExtFromUrl(url) ||
-    ".bin";
+  const contentType = mimetype || dl.contentType || "application/octet-stream";
+  const ext = extFromMime(contentType);
+  const day = new Date().toISOString().slice(0, 10);
 
-  const rand = crypto.randomBytes(6).toString("hex");
-  const phone = safeName(phoneE164 || "unknown");
-  const prefix = safeName(filenamePrefix || "file");
-  const key = `${folder || "uploads"}/${ymd()}/${phone}/${prefix}_${rand}${ext}`;
-
-  await s3.send(
-    new PutObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: key,
-      Body: buffer,
-      ContentType: contentType || mimetype || "application/octet-stream"
-    })
+  const key = safePath(
+    [
+      folder || "uploads",
+      day,
+      `${filenamePrefix || "file"}_${sha1(phoneE164)}_${sha1(url)}.${ext}`,
+    ].join("/")
   );
 
-  const publicUrl = `${R2_PUBLIC_BASE.replace(/\/+$/, "")}/${key}`;
-  return { key, publicUrl, contentType: contentType || mimetype || "" };
+  const publicUrl = await uploadBufferToR2({ key, buf: dl.buf, contentType });
+
+  return { publicUrl, contentType, key };
 }
 
 module.exports = { storeToR2 };
