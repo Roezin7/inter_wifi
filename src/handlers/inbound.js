@@ -197,7 +197,20 @@ async function handleInbound({ inbound, send }) {
       if (out) msg = String(out).trim();
     } catch {}
 
-    if (msg) await send(msg);
+    try {
+  if (msg) await send(msg);
+} catch (e) {
+  // NO rompas el flujo por un error de envío
+  logEvent({
+    event: "send_failed",
+    intent: flow,
+    step,
+    kind,
+    error: String(e?.message || e),
+    phone: maskPhone(inbound.phoneE164),
+    provider_msg_id: providerMsgId || null
+  });
+}
 
     await insertWaMessage({
       sessionId: sessionId || null,

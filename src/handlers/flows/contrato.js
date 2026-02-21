@@ -7,7 +7,7 @@ const {
 } = require("../../utils/validators");
 
 const { createContract } = require("../../services/contractsService");
-const { notifyAdmin } = require("../../services/notifyService");
+const { notifyAdmin, buildNewContractAdminMsg } = require("../../services/notifyService");
 const { parsePhoneE164 } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
 
@@ -17,16 +17,23 @@ try {
   ({ templates, pick } = require("../../utils/replies"));
 } catch {}
 
+// =====================
+// Helpers
+// =====================
 function looksLikeAddress(text) {
   const s = String(text || "").trim();
   if (s.length < 3) return false;
+
   const hasNumber = /\d/.test(s);
   const hasComma = s.includes(",");
   const hasColWord = /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
+
   const words = s.split(/\s+/).filter(Boolean);
   if (words.length === 1 && !hasNumber) return false;
+
   if (hasComma || hasNumber || hasColWord) return true;
   if (words.length >= 2 && s.length >= 10) return true;
+
   return false;
 }
 
@@ -49,6 +56,23 @@ function confirmColonia(col, seed) {
   return `¿Te refieres a la colonia *${col}*? Responde *sí* o *no* 🙂`;
 }
 
+// Extrae url + (si existe) id/mime de un media.
+// Mantiene compatibilidad con tu inbound.media actual.
+function pickMedia(inboundMedia) {
+  const urls = inboundMedia?.urls || [];
+  const items = inboundMedia?.items || []; // por si en el futuro agregas items
+  const first = items?.[0] || null;
+
+  return {
+    url: first?.url || urls?.[0] || null,
+    id: first?.id || inboundMedia?.id || null,
+    mimetype: first?.mimetype || inboundMedia?.mimetype || null
+  };
+}
+
+// =====================
+// Flow
+// =====================
 async function handle({ session, inbound, send, updateSession, closeSession }) {
   const step = Number(session.step || 1);
   const data = session.data || {};
@@ -62,8 +86,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    // Si viene dirección completa, intentamos resolver colonia con IA (opcional)
-    // pero tu pedido fue DB-first: así que SOLO DB usando el texto recibido.
     const res = await resolveColonia(txt, { limit: 5 });
 
     if (!res.ok) {
@@ -85,7 +107,10 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         colonia_confirmed: true
       };
       await updateSession({ step: 11, data: nextData });
-      await send(`Perfecto ✅ Colonia *${nextData.colonia}*.\n¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)`);
+      await send(
+        `Perfecto ✅ Colonia *${nextData.colonia}*.\n` +
+          `¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)`
+      );
       return;
     }
 
@@ -105,7 +130,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   if (step === 10) {
     const t = txt.toLowerCase();
     const isYes = /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(t);
-    const isNo  = /(no|nel|incorrecto|equivocado|error)/i.test(t);
+    const isNo = /(no|nel|incorrecto|equivocado|error)/i.test(t);
 
     if (isYes) {
       const nextData = {
@@ -114,7 +139,10 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         colonia_confirmed: true
       };
       await updateSession({ step: 11, data: nextData });
-      await send(`Listo ✅ Colonia *${nextData.colonia}*.\n¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)`);
+      await send(
+        `Listo ✅ Colonia *${nextData.colonia}*.\n` +
+          `¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)`
+      );
       return;
     }
 
@@ -147,6 +175,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       await send("¿Me compartes tu *nombre completo*, por favor?");
       return;
     }
+
     await updateSession({ step: 3, data: { ...data, nombre: txt } });
     await send("Perfecto. ¿Qué *teléfono* dejamos de contacto? (10 dígitos o escribe *mismo*)");
     return;
@@ -184,8 +213,23 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       await send("Necesito la *foto del frente* de la INE 📸 (envíala como imagen, porfa)");
       return;
     }
-    const url = inbound.media.urls[0];
-    await updateSession({ step: 5, data: { ...data, ine_frente_url: url } });
+
+    const m = pickMedia(inbound.media);
+    if (!m.url) {
+      await send("No pude leer la imagen 😅 ¿Me la reenvías como *foto*?");
+      return;
+    }
+
+    await updateSession({
+      step: 5,
+      data: {
+        ...data,
+        ine_frente_url: m.url,
+        ine_frente_media_id: m.id || null,
+        ine_frente_mime: m.mimetype || null
+      }
+    });
+
     await send("Gracias. Ahora envíame la foto de tu *INE (atrás)* 📸");
     return;
   }
@@ -197,36 +241,62 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    const url = inbound.media.urls[0];
-    const finalData = { ...data, ine_reverso_url: url };
+    const m = pickMedia(inbound.media);
+    if (!m.url) {
+      await send("No pude leer la imagen 😅 ¿Me la reenvías como *foto*?");
+      return;
+    }
+
+    // ✅ Anti-duplicado (mismo archivo que el frente)
+    const sameUrl = data.ine_frente_url && m.url === data.ine_frente_url;
+    const sameId =
+      data.ine_frente_media_id && m.id && String(m.id) === String(data.ine_frente_media_id);
+
+    if (sameUrl || sameId) {
+      await send(
+        "Me llegó la misma imagen que la del *frente* 😅\n" +
+          "¿Me reenvías la foto de la INE *por atrás*? 📸"
+      );
+      return;
+    }
+
+    const finalData = {
+      ...data,
+      ine_reverso_url: m.url,
+      ine_reverso_media_id: m.id || null,
+      ine_reverso_mime: m.mimetype || null
+    };
 
     const c = await createContract({
       phoneE164,
       nombre: finalData.nombre,
       colonia: finalData.colonia,
+      calle_numero: finalData.calle_numero, // ✅
       telefono_contacto: finalData.telefono_contacto,
       ine_frente_url: finalData.ine_frente_url,
-      ine_reverso_url: finalData.ine_reverso_url
+      ine_reverso_url: finalData.ine_reverso_url,
+      // opcionales (solo si tu DB/insert los soporta)
+      ine_frente_media_id: finalData.ine_frente_media_id,
+      ine_reverso_media_id: finalData.ine_reverso_media_id,
+      ine_frente_mime: finalData.ine_frente_mime,
+      ine_reverso_mime: finalData.ine_reverso_mime
     });
 
-    await notifyAdmin(
-      `📩 NUEVO CONTRATO ${c.folio}\n` +
-      `Nombre: ${c.nombre}\n` +
-      `Tel: ${c.telefono_contacto}\n` +
-      `Colonia: ${c.colonia}\n` +
-      `INE frente: ${c.ine_frente_url}\n` +
-      `INE atrás: ${c.ine_reverso_url}`
-    );
+    // ✅ Notificación admin PRO (y que se vea bonito en WhatsApp)
+    await notifyAdmin(buildNewContractAdminMsg(c));
 
+    // ✅ Cierra sesión ANTES del último send para evitar “proceso abierto” si falla el envío
     await closeSession(session.session_id);
+
     await send(
       `Listo ✅ Ya quedó tu solicitud.\n` +
-      `Folio: *${c.folio}*\n\n` +
-      "En breve te contactamos para confirmar la instalación 🙌"
+        `Folio: *${c.folio}*\n\n` +
+        "En breve te contactamos para confirmar la instalación 🙌"
     );
     return;
   }
 
+  // fallback
   await closeSession(session.session_id);
   await send("Listo ✅ Si necesitas algo más, aquí estoy.");
 }
