@@ -11,7 +11,7 @@ const {
   closeIfTimedOut
 } = require("../services/sessionsService");
 
-const { notifyAdmin } = require("../services/notifyService"); // ✅ para comando "agente"
+const { notifyAdmin } = require("../services/notifyService");
 
 const contrato = require("./flows/contrato");
 const pago = require("./flows/pago");
@@ -68,7 +68,6 @@ function maskPhone(p) {
 }
 
 function logEvent(evt) {
-  // Render lo imprime y puedes filtrar por "event":"..."
   console.log(JSON.stringify({
     ts: new Date().toISOString(),
     app: "interwifi-bot",
@@ -100,10 +99,6 @@ function isGreetingOnly(text) {
 
 function isMenuWord(text) {
   return /^(menu|menú|inicio|opciones|volver|regresar)$/i.test(norm(text));
-}
-
-function isContinueWord(text) {
-  return /^(continuar|seguir|continue|dale|ok|va|sí|si)$/i.test(norm(text));
 }
 
 function isCancelWord(text) {
@@ -214,11 +209,7 @@ async function handleInbound({ inbound, send }) {
     if (existing) {
       const timedOut = await closeIfTimedOut(existing, SESSION_TIMEOUT_MIN, client);
       if (timedOut) {
-        logEvent({
-          event: "session_timeout",
-          session_id: existing.session_id,
-          phone: maskPhone(inbound.phoneE164)
-        });
+        logEvent({ event: "session_timeout", session_id: existing.session_id, phone: maskPhone(inbound.phoneE164) });
         existing = null;
       }
     }
@@ -229,7 +220,16 @@ async function handleInbound({ inbound, send }) {
     // NO SESSION
     // =====================
     if (!existing) {
-      // saludo/menu/corto => menú sin sesión
+      // ✅ PRIORIDAD: números 1-4 crean sesión (aunque sea un solo caracter)
+      if (choice) {
+        const flow = choice;
+        const session = await createSession({ phoneE164: inbound.phoneE164, flow, step: 1, data: { menu_mode: false } }, client);
+        await client.query("COMMIT");
+        await sendAndLog({ sessionId: session.session_id, flow, step: 1, kind: "intro_by_number_no_session", text: getIntro(flow, inbound) });
+        return;
+      }
+
+      // saludo/menu => menú sin sesión
       if (!inboundText || isGreetingOnly(inboundText) || isMenuWord(inboundText)) {
         await client.query("COMMIT");
         await sendAndLog({ sessionId: null, flow: "MENU", step: 0, kind: "menu_no_session", text: menu(inbound.profileName) });
@@ -249,8 +249,8 @@ async function handleInbound({ inbound, send }) {
         return;
       }
 
-      // ruteo: número → fast → LLM con umbral
-      let flow = choice || mapIntentFast(inboundText);
+      // ruteo: fast → LLM con umbral
+      let flow = mapIntentFast(inboundText);
 
       if (!flow) {
         const routed = await routeIntent(inboundText);
@@ -270,7 +270,7 @@ async function handleInbound({ inbound, send }) {
         flow = routed.intent;
       }
 
-      const session = await createSession({ phoneE164: inbound.phoneE164, flow, step: 1, data: {} }, client);
+      const session = await createSession({ phoneE164: inbound.phoneE164, flow, step: 1, data: { menu_mode: false } }, client);
 
       await client.query("COMMIT");
       await sendAndLog({ sessionId: session.session_id, flow, step: 1, kind: "intro_new_session", text: getIntro(flow, inbound) });
@@ -295,7 +295,7 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // ✅ agente: notifica admin, cierra sesión para evitar loops
+    // ✅ agente: notifica admin, cierra sesión
     if (isAgentWord(inboundText)) {
       await closeSession(existing.session_id, client, "agent_requested");
       await client.query("COMMIT");
@@ -318,8 +318,14 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // ✅ menú: NO cierres sesión; muestra menú + prompt de continuar
+    // ✅ menú: activa modo menú (no cierra sesión)
     if (isMenuWord(inboundText)) {
+      await updateSession({
+        sessionId: existing.session_id,
+        step: existing.step,
+        data: { ...(existing.data || {}), menu_mode: true }
+      }, client);
+
       await client.query("COMMIT");
       await sendAndLog({
         sessionId: existing.session_id,
@@ -331,19 +337,42 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // ✅ números 1-4 con sesión abierta: CAMBIAN flow (cerrar y abrir nuevo)
-    if (choice) {
+    // ✅ números 1-4 con sesión abierta:
+    // SOLO cambian de flow si el usuario está en menu_mode=true
+    // (evita conflicto con FAQ u otros sub-menús)
+    const menuMode = Boolean(existing?.data?.menu_mode);
+
+    if (choice && menuMode) {
       await closeSession(existing.session_id, client, "switch_flow");
-      const newSession = await createSession({ phoneE164: inbound.phoneE164, flow: choice, step: 1, data: {} }, client);
+      const newSession = await createSession({ phoneE164: inbound.phoneE164, flow: choice, step: 1, data: { menu_mode: false } }, client);
       await client.query("COMMIT");
       await sendAndLog({
         sessionId: newSession.session_id,
         flow: choice,
         step: 1,
-        kind: "switch_flow_by_number",
+        kind: "switch_flow_by_number_menu_mode",
         text: getIntro(choice, inbound)
       });
       return;
+    }
+
+    // si mandó un número pero NO está en menu_mode, no cambies de flow
+    // (esto previene que "1" dentro de FAQ se convierta en CONTRATO)
+    if (choice && !menuMode) {
+      // seguimos a flow handler, pero además limpiamos menu_mode por seguridad
+      await updateSession({
+        sessionId: existing.session_id,
+        step: existing.step,
+        data: { ...(existing.data || {}), menu_mode: false }
+      }, client);
+      // no return; dejamos que el handler lo procese
+    } else {
+      // cualquier otro texto real limpia menu_mode
+      await updateSession({
+        sessionId: existing.session_id,
+        step: existing.step,
+        data: { ...(existing.data || {}), menu_mode: false }
+      }, client);
     }
 
     // ✅ saludo con sesión: no avances flujo
@@ -359,7 +388,6 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // continuar -> sigue normal (no se intercepta)
     // =====================
     // lock + flow handle
     // =====================
