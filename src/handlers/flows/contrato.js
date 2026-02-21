@@ -41,8 +41,8 @@ function intro(seed) {
   if (templates && pick) return pick(templates.contrato_intro, seed)();
   return (
     "Va, te ayudo con la contratación 🙌\n" +
-    "Para revisar cobertura, ¿me compartes *colonia* y *calle con número*?\n" +
-    "Ejemplo: “Centro, Hidalgo 311”."
+    "Para revisar cobertura, ¿me compartes *colonia*?\n" +
+    "Ejemplo: “Centro”."
   );
 }
 
