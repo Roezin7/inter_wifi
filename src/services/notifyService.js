@@ -1,40 +1,57 @@
-// src/services/notifyService.js
 const { sendText } = require("./wasenderService");
+const { normalizeMX10ToE164 } = require("../utils/validators");
 
-const ADMIN_E164 = process.env.ADMIN_E164; // +52...
+function getAdminE164() {
+  const raw = String(process.env.ADMIN_PHONE_E164 || "").trim();
 
-function safe(s) {
-  return String(s || "").trim();
-}
+  if (!raw) return null;
 
-function labelLine(label, value) {
-  const v = safe(value);
-  return v ? `*${label}:* ${v}` : `*${label}:* —`;
-}
+  // Si ya viene en +52..., úsalo
+  if (/^\+\d{10,15}$/.test(raw)) return raw;
 
-function linkLine(label, url) {
-  const u = safe(url);
-  if (!u) return `*${label}:* —`;
-  // WhatsApp no permite "texto con link" real, pero así se ve ordenado
-  return `*${label}:*\n${u}`;
+  // Si alguien guardó "4491234567" por error
+  if (/^\d{10}$/.test(raw)) return normalizeMX10ToE164(raw);
+
+  // Si guardaron "52xxxxxxxxxx" sin "+"
+  if (/^52\d{10}$/.test(raw)) return `+${raw}`;
+
+  return raw; // última opción, pero lo loguearemos
 }
 
 async function notifyAdmin(text) {
-  if (!ADMIN_E164) return;
-  await sendText({ toE164: ADMIN_E164, text });
+  const admin = getAdminE164();
+  const msg = String(text || "").trim();
+
+  if (!admin) {
+    console.error("[ADMIN_NOTIFY] missing ADMIN_PHONE_E164");
+    return { ok: false, skipped: true, reason: "missing_admin_phone" };
+  }
+  if (!msg) return { ok: true, skipped: true };
+
+  try {
+    const res = await sendText({ toE164: admin, text: msg });
+    console.log("[ADMIN_NOTIFY] sent", { admin, ok: res?.ok });
+    return res;
+  } catch (err) {
+    console.error("[ADMIN_NOTIFY] failed", {
+      admin,
+      error: err?.message || String(err),
+    });
+    throw err; // IMPORTANT: si quieres que no rompa el flow, cambia a "return {ok:false}"
+  }
 }
 
 function buildNewContractAdminMsg(c) {
+  // OJO: mantenlo CORTO para evitar fallos por tamaño.
+  // No metas urls gigantes si no es necesario.
   return (
-    `📩 *NUEVO CONTRATO* ✅\n` +
-    `🧾 *Folio:* ${safe(c.folio)}\n\n` +
-    `${labelLine("Nombre", c.nombre)}\n` +
-    `${labelLine("Tel", c.telefono_contacto)}\n` +
-    `${labelLine("Colonia", c.colonia)}\n` +
-    `${labelLine("Dirección", c.calle_numero)}\n\n` +
-    `${linkLine("INE (frente)", c.ine_frente_url)}\n\n` +
-    `${linkLine("INE (atrás)", c.ine_reverso_url)}\n\n` +
-    `⚠️ *Nota:* Si el link se ve “.enc” o expira, pide que reenvíen la imagen por este chat.`
+    "📥 *Nueva solicitud de contratación*\n" +
+    `Folio: *${c.folio}*\n` +
+    `Nombre: ${c.nombre}\n` +
+    `Colonia: ${c.colonia}\n` +
+    `Dirección: ${c.calle_numero}\n` +
+    `Tel: ${c.telefono_contacto}\n` +
+    `Cliente WA: ${c.phone_e164}\n`
   );
 }
 
