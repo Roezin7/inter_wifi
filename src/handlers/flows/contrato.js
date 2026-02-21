@@ -12,8 +12,7 @@ const { parsePhoneE164 } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
 const { storeToR2 } = require("../../services/r2UploadService");
 
-// ✅ OJO: templates te estaban pisando textos (por eso veías mensajes que no están aquí).
-// Para evitarlo, los desactivamos:
+// ✅ Para evitar que replies/templates te cambien textos sin querer
 const USE_TEMPLATES = false;
 let templates, pick;
 if (USE_TEMPLATES) {
@@ -42,8 +41,16 @@ function looksLikeAddress(text) {
   return false;
 }
 
+/**
+ * Permite:
+ * - "Centro, Hidalgo 311" -> colonia=Centro, calleNum=Hidalgo 311
+ * - "Centro Hidalgo 311" -> heurística: colonia=Centro, calleNum=Hidalgo 311
+ * - "Centro" -> colonia=Centro, calleNum=""
+ * - "Hidalgo 311" -> colonia="", calleNum="Hidalgo 311"
+ */
 function splitColoniaAndAddress(text) {
   const s = String(text || "").trim();
+  if (!s) return { colonia: "", calleNum: "" };
 
   // "Centro, Hidalgo 311"
   if (s.includes(",")) {
@@ -51,10 +58,19 @@ function splitColoniaAndAddress(text) {
     return { colonia: a || "", calleNum: b || "" };
   }
 
+  // Si parece solo dirección (tiene número, pero no coma y no "colonia/centro...")
+  // ej: "Hidalgo 311"
+  const hasNumber = /\d/.test(s);
+  const mentionsCol = /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro|morelos|am[eé]ricas)/i.test(
+    s
+  );
+  if (hasNumber && !mentionsCol) {
+    return { colonia: "", calleNum: s };
+  }
+
   // "Centro Hidalgo 311" (sin coma)
-  if (/\d/.test(s) && s.length >= 8) {
+  if (hasNumber && s.length >= 8) {
     const parts = s.split(/\s+/).filter(Boolean);
-    // colonia = 1er palabra si el resto tiene número (heurística)
     const colonia = parts[0] || "";
     const calleNum = parts.slice(1).join(" ");
     return { colonia, calleNum };
@@ -83,6 +99,10 @@ function confirmColonia(col) {
   return `¿Te refieres a la colonia *${col}*? Responde *sí* o *no* 🙂`;
 }
 
+/**
+ * Normaliza media (WASender):
+ * Recomendado: inbound.media.items[0] = { url, mimetype, mediaKey, fileName, id }
+ */
 function pickMedia(inboundMedia) {
   const urls = inboundMedia?.urls || [];
   const items = inboundMedia?.items || [];
@@ -92,7 +112,16 @@ function pickMedia(inboundMedia) {
     url: first?.url || urls?.[0] || null,
     id: first?.id || inboundMedia?.id || null,
     mimetype: first?.mimetype || inboundMedia?.mimetype || null,
+    mediaKey: first?.mediaKey || null,
+    fileName: first?.fileName || null,
   };
+}
+
+function looksLikeYes(t) {
+  return /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(String(t || "").trim());
+}
+function looksLikeNo(t) {
+  return /(no|nel|incorrecto|equivocado|error)/i.test(String(t || "").trim());
 }
 
 // =====================
@@ -113,16 +142,16 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     const { colonia: coloniaRaw, calleNum } = splitColoniaAndAddress(txt);
 
-    // si el user mandó solo calle/numero sin colonia
-    if (looksLikeAddress(txt) && !coloniaRaw) {
-      await send(askColonia());
+    // Si mandó "Hidalgo 311" (solo dirección) -> pedir colonia
+    if (!coloniaRaw && looksLikeAddress(txt)) {
+      await send("¿En qué *colonia* queda esa calle? (Ej: Centro)");
       return;
     }
 
     // Resolver colonia contra DB
     const res = await resolveColonia(coloniaRaw, { limit: 5 });
 
-    if (!res.ok) {
+    if (!res?.ok) {
       await send(askColonia());
       return;
     }
@@ -136,7 +165,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         colonia_confirmed: true,
       };
 
-      // ✅ Si ya mandó calle y número, nos saltamos STEP 11
+      // ✅ Si ya mandó calle y número, saltamos STEP 11
       if (calleNum && /\d/.test(calleNum) && calleNum.length >= 4) {
         await updateSession({ step: 2, data: { ...nextData, calle_numero: calleNum } });
         await send(
@@ -160,7 +189,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       colonia_input: coloniaRaw,
       colonia_guess: res.best.colonia,
       colonia_candidates: res.candidates,
-      // guardamos calle si ya la mandó (para usarla luego si confirma)
       calle_numero_pending: calleNum || null,
     };
 
@@ -171,11 +199,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
   // STEP 10: confirmar colonia
   if (step === 10) {
-    const t = txt.toLowerCase();
-    const isYes = /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(t);
-    const isNo = /(no|nel|incorrecto|equivocado|error)/i.test(t);
-
-    if (isYes) {
+    if (looksLikeYes(txt)) {
       const colonia = data.colonia_guess;
 
       // si ya había calle pendiente, saltamos a nombre
@@ -204,8 +228,11 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    if (isNo) {
-      await updateSession({ step: 1, data: { ...data, colonia_guess: null } });
+    if (looksLikeNo(txt)) {
+      await updateSession({
+        step: 1,
+        data: { ...data, colonia_guess: null, calle_numero_pending: null },
+      });
       await send("Va 🙂 dime tu *colonia* (Ej: Centro, Las Américas, Morelos).");
       return;
     }
@@ -273,8 +300,20 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     const m = pickMedia(inbound.media);
+
     if (!m.url) {
       await send("No pude leer la imagen 😅 ¿Me la reenvías como *foto*?");
+      return;
+    }
+
+    // 🔥 CLAVE: para descifrar .enc se necesita mediaKey + mimetype
+    if (!m.mediaKey || !m.mimetype) {
+      console.error("[CONTRATO][INE_FRENTE] missing mediaKey/mimetype", {
+        hasUrl: !!m.url,
+        hasMediaKey: !!m.mediaKey,
+        mimetype: m.mimetype,
+      });
+      await send("No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.");
       return;
     }
 
@@ -282,12 +321,15 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     try {
       uploaded = await storeToR2({
         url: m.url,
-        mimetype: m.mimetype || "",
+        mediaKey: m.mediaKey,
+        mimetype: m.mimetype,
+        fileName: m.fileName,
         folder: "contracts/ine",
         filenamePrefix: "ine_frente",
         phoneE164,
       });
     } catch (e) {
+      console.error("[CONTRATO][INE_FRENTE] storeToR2 failed:", e?.message || e);
       await send("Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?");
       return;
     }
@@ -299,7 +341,8 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         ine_frente_url: uploaded.publicUrl, // ✅ pública (no .enc)
         ine_frente_media_id: m.id || null,
         ine_frente_mime: uploaded.contentType || m.mimetype || null,
-        ine_frente_source_url: m.url, // opcional: auditoría
+        ine_frente_source_url: m.url, // auditoría
+        ine_frente_source_mediaKey: m.mediaKey, // auditoría
       },
     });
 
@@ -315,12 +358,23 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     const m = pickMedia(inbound.media);
+
     if (!m.url) {
       await send("No pude leer la imagen 😅 ¿Me la reenvías como *foto*?");
       return;
     }
 
-    // anti duplicado
+    if (!m.mediaKey || !m.mimetype) {
+      console.error("[CONTRATO][INE_REVERSO] missing mediaKey/mimetype", {
+        hasUrl: !!m.url,
+        hasMediaKey: !!m.mediaKey,
+        mimetype: m.mimetype,
+      });
+      await send("No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.");
+      return;
+    }
+
+    // anti duplicado (por id/url)
     const sameId =
       data.ine_frente_media_id && m.id && String(m.id) === String(data.ine_frente_media_id);
     const sameUrl =
@@ -338,12 +392,15 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     try {
       uploaded = await storeToR2({
         url: m.url,
-        mimetype: m.mimetype || "",
+        mediaKey: m.mediaKey,
+        mimetype: m.mimetype,
+        fileName: m.fileName,
         folder: "contracts/ine",
         filenamePrefix: "ine_reverso",
         phoneE164,
       });
     } catch (e) {
+      console.error("[CONTRATO][INE_REVERSO] storeToR2 failed:", e?.message || e);
       await send("Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?");
       return;
     }
@@ -354,6 +411,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       ine_reverso_media_id: m.id || null,
       ine_reverso_mime: uploaded.contentType || m.mimetype || null,
       ine_reverso_source_url: m.url,
+      ine_reverso_source_mediaKey: m.mediaKey,
     };
 
     const c = await createContract({
@@ -362,8 +420,12 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       colonia: finalData.colonia,
       calle_numero: finalData.calle_numero,
       telefono_contacto: finalData.telefono_contacto,
+
+      // ✅ ya NO son .enc (son URLs públicas R2/CDN)
       ine_frente_url: finalData.ine_frente_url,
       ine_reverso_url: finalData.ine_reverso_url,
+
+      // opcionales
       ine_frente_media_id: finalData.ine_frente_media_id,
       ine_reverso_media_id: finalData.ine_reverso_media_id,
       ine_frente_mime: finalData.ine_frente_mime,
@@ -382,6 +444,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
+  // fallback
   await closeSession(session.session_id);
   await send("Listo ✅ Si necesitas algo más, aquí estoy.");
 }

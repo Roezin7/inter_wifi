@@ -2,42 +2,35 @@
 const crypto = require("crypto");
 const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
 
-// ==============
-// R2 (S3 compat)
-// ==============
+// ===================
+// R2 (S3 compatible)
+// ===================
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
 const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 const R2_BUCKET = process.env.R2_BUCKET;
-const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE;
+const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE; // https://pub-xxx.r2.dev o tu CDN
 
-const r2 =
-  R2_ACCOUNT_ID &&
-  R2_ACCESS_KEY_ID &&
-  R2_SECRET_ACCESS_KEY &&
-  R2_BUCKET &&
-  R2_PUBLIC_BASE
-    ? new S3Client({
-        region: "auto",
-        endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-        credentials: {
-          accessKeyId: R2_ACCESS_KEY_ID,
-          secretAccessKey: R2_SECRET_ACCESS_KEY,
-        },
-      })
-    : null;
-
-// ==============
-// WASENDER
-// ==============
-const WASENDER_BASE_URL = process.env.WASENDER_BASE_URL; // ej: https://wasenderapi.com/api
-const WASENDER_API_KEY = process.env.WASENDER_API_KEY;
-
-// ✅ AJUSTA ESTO A TU WASENDER REAL
-// opción A: endpoint directo para descargar binario
-function wasenderMediaDownloadUrl(mediaId) {
-  return `${WASENDER_BASE_URL}/media/${encodeURIComponent(mediaId)}/download`;
+function requiredEnvOk() {
+  return (
+    R2_ACCOUNT_ID &&
+    R2_ACCESS_KEY_ID &&
+    R2_SECRET_ACCESS_KEY &&
+    R2_BUCKET &&
+    R2_PUBLIC_BASE
+  );
 }
+
+const r2 = requiredEnvOk()
+  ? new S3Client({
+      region: "auto",
+      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
+      },
+    })
+  : null;
 
 function extFromMime(mime) {
   const m = String(mime || "").toLowerCase();
@@ -45,6 +38,7 @@ function extFromMime(mime) {
   if (m.includes("png")) return "png";
   if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
   if (m.includes("webp")) return "webp";
+  if (m.includes("gif")) return "gif";
   return "bin";
 }
 
@@ -52,56 +46,70 @@ function sha1(s) {
   return crypto.createHash("sha1").update(String(s || "")).digest("hex").slice(0, 12);
 }
 
-function safePath(s) {
-  return String(s || "")
-    .replace(/[^a-zA-Z0-9/_\.-]+/g, "_")
-    .replace(/\/{2,}/g, "/")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 240);
+// ==============
+// WhatsApp HKDF
+// ==============
+function getInfoLabel(mediaType) {
+  // según WA spec / docs de Wasender
+  const map = {
+    image: "WhatsApp Image Keys",
+    sticker: "WhatsApp Image Keys",
+    video: "WhatsApp Video Keys",
+    audio: "WhatsApp Audio Keys",
+    document: "WhatsApp Document Keys",
+  };
+  return map[mediaType] || null;
 }
 
-async function downloadFromWasender(mediaId) {
+function detectMediaTypeFromMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  if (m.startsWith("audio/")) return "audio";
+  if (m === "application/pdf") return "document";
+  if (m.startsWith("application/")) return "document";
+  return "document";
+}
 
-  if (!WASENDER_BASE_URL || !WASENDER_API_KEY) {
-    throw new Error("WASender not configured (missing WASENDER_BASE_URL/WASENDER_API_KEY)");
-  }
-  if (!mediaId) throw new Error("downloadFromWasender: missing mediaId");
-
-  const url = wasenderMediaDownloadUrl(mediaId);
-
-  const res = await fetch(url, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${WASENDER_API_KEY}` },
+async function hkdfSha256(ikm, info, len) {
+  return new Promise((resolve, reject) => {
+    crypto.hkdf("sha256", ikm, Buffer.alloc(0), info, len, (err, derivedKey) => {
+      if (err) return reject(err);
+      resolve(Buffer.from(derivedKey));
+    });
   });
-  console.log("WASENDER STATUS:", res.status);
-console.log("WASENDER HEADERS:", Object.fromEntries(res.headers.entries()));
-
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`WASender download failed: ${res.status} ${t.slice(0, 200)}`);
-  }
-
-  const contentType = res.headers.get("content-type") || "application/octet-stream";
-  const buf = Buffer.from(await res.arrayBuffer())
-
-
-  return { buf, contentType };
-  
 }
 
-async function downloadFromUrl(url) {
+async function decryptWhatsAppMedia({ encBuf, mediaKeyB64, mediaType }) {
+  const info = getInfoLabel(mediaType);
+  if (!info) throw new Error(`Invalid mediaType for HKDF: ${mediaType}`);
+
+  const mediaKey = Buffer.from(mediaKeyB64, "base64");
+  const derived = await hkdfSha256(mediaKey, info, 112);
+
+  const iv = derived.slice(0, 16);
+  const cipherKey = derived.slice(16, 48);
+
+  // WA: últimos 10 bytes son MAC => se recorta para descifrar
+  const ciphertext = encBuf.slice(0, -10);
+
+  const decipher = crypto.createDecipheriv("aes-256-cbc", cipherKey, iv);
+  const dec = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return dec;
+}
+
+async function fetchBuffer(url) {
   const res = await fetch(url);
   if (!res.ok) {
     const t = await res.text().catch(() => "");
-    throw new Error(`download url failed: ${res.status} ${t.slice(0, 200)}`);
+    throw new Error(`Download failed: ${res.status} ${t.slice(0, 200)}`);
   }
-  const contentType = res.headers.get("content-type") || "application/octet-stream";
-  const buf = Buffer.from(await res.arrayBuffer());
-  return { buf, contentType };
+  const ab = await res.arrayBuffer();
+  return Buffer.from(ab);
 }
 
-async function uploadToR2({ key, buf, contentType }) {
-  if (!r2) throw new Error("R2 not configured (missing R2 env vars)");
+async function putToR2({ key, buf, contentType }) {
+  if (!r2) throw new Error("R2 not configured (missing env vars)");
 
   await r2.send(
     new PutObjectCommand({
@@ -119,36 +127,52 @@ async function uploadToR2({ key, buf, contentType }) {
 
 /**
  * storeToR2
- * - Si hay mediaId => descarga REAL desde WASender (NO .enc)
- * - Si no hay mediaId => intenta url, pero si es .enc no sirve (cifrado)
+ * - Descarga .enc desde Wasender URL
+ * - Descifra con mediaKey
+ * - Sube a R2 con mimetype real y extensión correcta
  */
-async function storeToR2({ providerUrl, mediaId, mime, folder, filenamePrefix, phoneE164 }) {
-  const url = String(providerUrl || "");
-  const isEnc = /\.enc(\?|$)/i.test(url);
+async function storeToR2({
+  url,
+  mediaKey,
+  mimetype,
+  fileName,
+  folder = "uploads",
+  filenamePrefix = "file",
+  phoneE164 = "",
+}) {
+  if (!url) throw new Error("storeToR2: missing url");
+  if (!mediaKey) throw new Error("storeToR2: missing mediaKey");
+  if (!mimetype) throw new Error("storeToR2: missing mimetype");
 
-  let dl;
+  const mediaType = detectMediaTypeFromMime(mimetype);
 
-  if (mediaId) {
-    dl = await downloadFromWasender(mediaId);
-  } else {
-    if (isEnc) {
-      throw new Error("storeToR2: providerUrl is .enc but no mediaId was provided");
-    }
-    dl = await downloadFromUrl(url);
-  }
+  const encBuf = await fetchBuffer(url);
+  if (!encBuf?.length) throw new Error("storeToR2: empty encrypted buffer");
 
-  const contentType = String(mime || "").trim() || dl.contentType || "application/octet-stream";
-  const ext = extFromMime(contentType);
+  const decBuf = await decryptWhatsAppMedia({
+    encBuf,
+    mediaKeyB64: mediaKey,
+    mediaType,
+  });
 
-  const day = new Date().toISOString().slice(0, 10);
+  const ext = extFromMime(mimetype);
 
-  const key = safePath(
-    `${folder || "uploads"}/${day}/${filenamePrefix || "file"}_${sha1(phoneE164)}_${sha1(mediaId || url)}.${ext}`
-  );
+  // nombre final
+  const key = [
+    String(folder || "uploads").replace(/^\/+|\/+$/g, ""),
+    new Date().toISOString().slice(0, 10),
+    `${filenamePrefix}_${sha1(phoneE164)}_${sha1(url)}.${ext}`,
+  ].join("/");
 
-  const publicUrl = await uploadToR2({ key, buf: dl.buf, contentType });
+  const publicUrl = await putToR2({ key, buf: decBuf, contentType: mimetype });
 
-  return { publicUrl, contentType, key };
+  return {
+    publicUrl,
+    contentType: mimetype,
+    key,
+    size: decBuf.length,
+    originalFileName: fileName || null,
+  };
 }
 
 module.exports = { storeToR2 };
