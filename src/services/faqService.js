@@ -19,9 +19,8 @@ function norm(s) {
 }
 
 function stemToken(t) {
-  // súper simple: plural final
   if (!t) return "";
-  if (t.length > 4 && t.endsWith("s")) return t.slice(0, -1);
+  if (t.length > 4 && t.endsWith("s")) return t.slice(0, -1); // plural simple
   return t;
 }
 
@@ -34,82 +33,69 @@ function tokenize(s) {
 function jaccard(aTokens, bTokens) {
   const A = new Set(aTokens);
   const B = new Set(bTokens);
-  if (A.size === 0 || B.size === 0) return 0;
+  if (!A.size || !B.size) return 0;
 
   let inter = 0;
   for (const x of A) if (B.has(x)) inter++;
-
   const union = A.size + B.size - inter;
   return union ? inter / union : 0;
 }
 
 /**
  * Keyword score PRO:
- * - ya NO divide por todas las keywords (eso castigaba mucho)
- * - si hay 1 hit => base alto
- * - más hits => sube, con tope
+ * - 1 hit ya da score alto
+ * - más hits sube con saturación
  */
 function keywordHitScore(textNorm, keywords) {
   if (!keywords || !Array.isArray(keywords) || keywords.length === 0) return 0;
 
   let hits = 0;
+  const tt = textNorm.split(" ").map(stemToken);
 
   for (const k of keywords) {
     const kk = norm(k);
     if (!kk) continue;
 
-    // match por substring
     if (textNorm.includes(kk)) {
       hits++;
       continue;
     }
 
-    // match por token (y singular/plural)
-    const tt = textNorm.split(" ").map(stemToken);
     const kt = kk.split(" ").map(stemToken);
-
-    // si todos los tokens de keyword están presentes (para frases tipo "banco azteca")
     const ok = kt.every((x) => tt.includes(x));
     if (ok) hits++;
   }
 
   if (hits <= 0) return 0;
-
-  // base fuerte por primer hit + extra por adicionales con saturación
-  // 1 hit => 0.78  | 2 hits => 0.88 | 3 hits => 0.95 | >=4 => 1.0
   return Math.min(1, 0.70 + 0.10 * hits);
 }
 
-/**
- * Optional: “boost” si el input es muy corto y coincide con categoría canónica
- */
 function canonicalIntent(textNorm) {
   const t = norm(textNorm);
 
   if (/^(horario|horarios)$/.test(t)) return "horarios";
   if (/^(ubicacion|direccion|donde|donde estan|donde estan ubicados)$/.test(t)) return "ubicacion";
-  if (/^(pago|pagos|formas de pago|deposito|transferencia|oxxo|spin|azteca)$/.test(t)) return "pagos";
-  if (/^(precio|precios|paquete|paquetes|plan|planes)$/.test(t)) return "precios";
+  if (/^(pago|pagos|forma de pago|formas de pago|como pagar|donde pagar|deposito|transferencia|oxxo|spin|azteca)$/.test(t)) return "pagos";
+  if (/^(precio|precios|paquete|paquetes|plan|planes|cuanto cuesta|cuánto cuesta)$/.test(t)) return "precios";
 
   return null;
 }
 
 /**
  * matchFaq:
- * score robusto:
- * - keywordHitScore (muy determinante)
- * - jaccard de pregunta
- * - boost canónico (horarios/ubicacion/pagos/precios)
+ * - trae FAQs activas
+ * - score robusto: 0.70 keyword + 0.30 jaccard
+ * - boost canónico por categoría
+ * - NO filtra kind aquí: el handler decide si quiere SUMMARY/DETAIL
  */
 async function matchFaq(userText, threshold = 0.62) {
   const textNorm = norm(userText);
   const tokens = tokenize(userText);
-
   if (!textNorm) return { matched: false, score: 0, faq: null };
 
   const { rows } = await query(
     `
-    SELECT id, question, answer, category, keywords, priority
+    SELECT id, question, answer, category, keywords, priority, kind, group_key
     FROM wa_faqs
     WHERE active = true
     ORDER BY priority DESC, id ASC
@@ -124,30 +110,27 @@ async function matchFaq(userText, threshold = 0.62) {
 
   for (const f of rows) {
     const qTokens = tokenize(f.question);
-    const jac = jaccard(tokens, qTokens); // 0..1
-    const key = keywordHitScore(textNorm, f.keywords); // 0..1
+    const jac = jaccard(tokens, qTokens);
+    const key = keywordHitScore(textNorm, f.keywords);
 
     let score = (0.70 * key) + (0.30 * jac);
 
-    // boost si input es canónico y la faq cae en esa categoría
+    // boost canónico por categoría
     if (canon) {
-      const c = norm(f.category);
-      if (canon === "horarios" && c === "info") score = Math.min(1, score + 0.20);
-      if (canon === "ubicacion" && c === "info") score = Math.min(1, score + 0.20);
-      if (canon === "pagos" && c === "pagos") score = Math.min(1, score + 0.20);
-      if (canon === "precios" && c === "precios") score = Math.min(1, score + 0.20);
+      const cat = norm(f.category);
+      if ((canon === "horarios" || canon === "ubicacion") && cat === "info") score = Math.min(1, score + 0.20);
+      if (canon === "pagos" && cat === "pagos") score = Math.min(1, score + 0.20);
+      if (canon === "precios" && cat === "precios") score = Math.min(1, score + 0.20);
     }
 
     if (!best || score > best.score) best = { score, faq: f };
   }
 
-  if (!best) return { matched: false, score: 0, faq: null };
-
-  const matched = best.score >= threshold;
+  const matched = best && best.score >= threshold;
 
   return {
     matched,
-    score: Number(best.score.toFixed(4)),
+    score: Number((best?.score || 0).toFixed(4)),
     faq: matched ? best.faq : null
   };
 }
@@ -155,7 +138,7 @@ async function matchFaq(userText, threshold = 0.62) {
 async function getFaqById(id) {
   const { rows } = await query(
     `
-    SELECT id, question, answer, category, keywords, priority, active
+    SELECT id, question, answer, category, keywords, priority, active, kind, group_key
     FROM wa_faqs
     WHERE id = $1
     LIMIT 1
@@ -165,22 +148,48 @@ async function getFaqById(id) {
   return rows[0] || null;
 }
 
-async function listFaqsByCategory(category) {
+async function getFaqSummaryByGroup(groupKey) {
   const { rows } = await query(
     `
-    SELECT id, question, answer, category, keywords, priority
+    SELECT id, question, answer, category, keywords, priority, kind, group_key
+    FROM wa_faqs
+    WHERE active = true AND kind = 'SUMMARY' AND group_key = $1
+    ORDER BY priority DESC, id ASC
+    LIMIT 1
+    `,
+    [groupKey]
+  );
+  return rows[0] || null;
+}
+
+async function listFaqsByCategory(category, { kind = null } = {}) {
+  const params = [category];
+  let kindSql = "";
+
+  if (kind) {
+    params.push(kind);
+    kindSql = " AND kind = $2 ";
+  }
+
+  const { rows } = await query(
+    `
+    SELECT id, question, answer, category, keywords, priority, kind, group_key
     FROM wa_faqs
     WHERE active = true AND category = $1
+    ${kindSql}
     ORDER BY priority DESC, id ASC
     `,
-    [category]
+    params
   );
+
   return rows || [];
 }
 
 module.exports = {
+  norm,
   matchFaq,
   getFaqById,
+  getFaqSummaryByGroup,
   listFaqsByCategory,
-  norm
+  canonicalIntent
 };
