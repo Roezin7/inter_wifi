@@ -1,5 +1,5 @@
 // src/handlers/flows/faq.js
-const { matchFaq, getFaqById } = require("../../services/faqService");
+const { matchFaq, getFaqById, listFaqsByCategory, norm } = require("../../services/faqService");
 
 function intro() {
   return (
@@ -12,14 +12,6 @@ function intro() {
   );
 }
 
-function norm(s) {
-  return String(s || "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^\p{L}\p{N}\s]/gu, "")
-    .replace(/\s+/g, " ");
-}
-
 function parseFaqChoice(text) {
   const t = norm(text);
   if (t === "1") return "horarios";
@@ -30,29 +22,66 @@ function parseFaqChoice(text) {
 }
 
 function formatAnswerPro(rawAnswer, category) {
-  // 1) arregla "\n" literal desde DB
+  // arregla \n literal
   let a = String(rawAnswer || "").replace(/\\n/g, "\n").trim();
-
-  // 2) mejora micro-formato
-  // - si vienen bullets con "•" está bien; si vienen con "-" igual
   a = a.replace(/\n{3,}/g, "\n\n");
 
-  // 3) header por categoría (opcional)
-  const cat = String(category || "").toLowerCase();
-  const header =
-    cat === "info" ? "📌 *Información*\n\n" :
-    cat === "pagos" ? "💳 *Pagos*\n\n" :
-    cat === "precios" ? "💰 *Precios y paquetes*\n\n" :
-    "";
+  const cat = norm(category);
 
-  // 4) cierre corporativo corto (no empalagoso)
+  const header =
+    cat === "info"
+      ? "📌 *Información*\n\n"
+      : cat === "pagos"
+        ? "💳 *Pagos*\n\n"
+        : cat === "precios"
+          ? "💰 *Precios y paquetes*\n\n"
+          : "";
+
+  // cierre “empresa” corto
   const footer =
     "\n\n" +
-    "Si quieres, dime tu *colonia* y te confirmo también la cobertura y tiempos por tu zona ✅";
+    "¿Te apoyo con algo más? Si quieres, escribe *menú* para ver todas las opciones.";
 
-  // Evita duplicar footer si el answer ya trae algo parecido
-  const alreadyHasFooter = /dime tu colonia|confirmo cobertura|por tu zona/i.test(a);
+  const alreadyHasFooter = /(escribe \*menu\*|escribe menu|te apoyo con algo mas)/i.test(a);
   return header + a + (alreadyHasFooter ? "" : footer);
+}
+
+/**
+ * Respuesta “Paquete Pagos” (PRO):
+ * junta las FAQs de categoría pagos y arma un mensaje único.
+ */
+async function buildPaymentsBundle() {
+  const faqs = await listFaqsByCategory("pagos");
+
+  if (!faqs.length) {
+    return (
+      "💳 *Pagos*\n\n" +
+      "Por ahora no tengo la información de pagos cargada.\n" +
+      "Escribe *agente* y un asesor te apoya."
+    );
+  }
+
+  // Priorizamos: transfer/deposito (id 5), fechas (id 2), oficina (id 3), despues de pagar (id 6), donde enviar (id 7)
+  const order = [5, 2, 3, 6, 7];
+  const byId = new Map(faqs.map((f) => [Number(f.id), f]));
+  const picked = [];
+
+  for (const id of order) if (byId.has(id)) picked.push(byId.get(id));
+  // agrega cualquier otro (por si creces el set)
+  for (const f of faqs) if (!picked.some((x) => x.id === f.id)) picked.push(f);
+
+  const lines = [];
+  lines.push("💳 *Pagos*\n");
+  for (const f of picked) {
+    const title = String(f.question || "").replace(/\?+$/, "").trim();
+    const ans = String(f.answer || "").replace(/\\n/g, "\n").trim();
+    lines.push(`*${title}*\n${ans}\n`);
+  }
+
+  lines.push("Si ya pagaste, también puedes escribir *registrar pago* para subir tu comprobante ✅");
+  lines.push("¿Necesitas algo más? Escribe *menú* para ver opciones.");
+
+  return lines.join("\n");
 }
 
 async function handle({ session, inbound, send, updateSession, closeSession }) {
@@ -60,39 +89,69 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   const data = session.data || {};
   const text = String(inbound.text || "").trim();
 
-  // STEP 1: acabamos de entrar a FAQ
-  // - Si el usuario entra por "4" desde menú principal (flow FAQ), inbound ya mandó intro
-  // - Aquí aceptamos el número 1-4 o texto libre.
-  if (step === 1) {
-    const choice = parseFaqChoice(text);
-
-    // Si NO hay texto (ej: llega webhook raro), re-pregunta
-    if (!text) {
+  // Si llega vacío, reenvía intro una sola vez
+  if (!text) {
+    if (step === 1) {
       await send(intro());
       return;
     }
+    await send("¿Me dices si es *horarios*, *ubicación*, *pagos* o *precios*? 🙂");
+    return;
+  }
 
-    // Si eligió 1-4, convertimos a query “canonical”
-    const queryText = choice || text;
+  // ===== STEP 1 =====
+  if (step === 1) {
+    const choice = parseFaqChoice(text);
 
+    // ✅ si elige 1–4: determinístico y sin match
+    if (choice === "horarios") {
+      const f = await getFaqById(4);
+      if (f?.answer) {
+        await send(formatAnswerPro(f.answer, f.category));
+        await closeSession(session.session_id);
+        return;
+      }
+    }
+
+    if (choice === "ubicacion") {
+      const f = await getFaqById(1);
+      if (f?.answer) {
+        await send(formatAnswerPro(f.answer, f.category));
+        await closeSession(session.session_id);
+        return;
+      }
+    }
+
+    if (choice === "pagos") {
+      await send(await buildPaymentsBundle());
+      await closeSession(session.session_id);
+      return;
+    }
+
+    if (choice === "precios") {
+      // (no tienes precios hoy en DB)
+      await send(
+        "💰 *Precios y paquetes*\n\n" +
+        "Aún no tengo la lista de paquetes cargada en este chat.\n" +
+        "Escribe *agente* y un asesor te manda la info al momento.\n\n" +
+        "También puedes escribir *menú* para ver opciones."
+      );
+      await closeSession(session.session_id);
+      return;
+    }
+
+    // ✅ texto libre: intenta match con score mejorado
     const threshold = Number(process.env.FAQ_MATCH_THRESHOLD || 0.62);
-    const m = await matchFaq(queryText, threshold);
+    const m = await matchFaq(text, threshold);
 
-    // ✅ Match directo a una FAQ
     if (m?.matched && m?.faq?.answer) {
       await send(formatAnswerPro(m.faq.answer, m.faq.category));
       await closeSession(session.session_id);
       return;
     }
 
-    // ❓ No match: pasamos a step 2 (modo clarificación)
-    await updateSession({
-      step: 2,
-      data: {
-        ...data,
-        last_query: queryText
-      }
-    });
+    // No match: pide clarificación (una vez) y pasa a step 2
+    await updateSession({ step: 2, data: { ...data, last_query: text } });
 
     await send(
       "Para ayudarte mejor, dime cuál necesitas:\n\n" +
@@ -105,15 +164,21 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
-  // STEP 2: clarificación (usuario responde 1-4 o escribe algo)
+  // ===== STEP 2 =====
   if (step === 2) {
     const choice = parseFaqChoice(text);
-    const queryText = choice || text || data.last_query || "";
 
-    if (!queryText) {
-      await send("¿Me dices si es *horarios*, *ubicación*, *pagos* o *precios*? 🙂");
-      return;
+    // si responde 1-4 ya resolvemos determinístico
+    if (choice) {
+      // reusamos el step 1 “determinístico”
+      await updateSession({ step: 1, data });
+      // llamada recursiva segura (sin loops): procesamos como si fuera step 1
+      session.step = 1;
+      inbound.text = text;
+      return handle({ session, inbound, send, updateSession, closeSession });
     }
+
+    const queryText = text || data.last_query || "";
 
     const threshold = Number(process.env.FAQ_MATCH_THRESHOLD || 0.62);
     const m = await matchFaq(queryText, threshold);
@@ -124,21 +189,20 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    // Si sigue sin match: respuesta PRO + salida limpia (no atora el chat)
+    // sigue sin match => salida limpia (sin spamear)
     await send(
       "Puedo ayudarte con:\n" +
       "• *Horarios*\n" +
       "• *Ubicación*\n" +
       "• *Formas de pago*\n" +
       "• *Precios / paquetes*\n\n" +
-      "Escríbeme cualquiera de esas opciones, o escribe *menú* para ver todo."
+      "Escríbeme una de esas opciones o responde con *1–4*. Si prefieres, escribe *agente*."
     );
 
     await closeSession(session.session_id);
     return;
   }
 
-  // fallback
   await closeSession(session.session_id);
   await send("Listo ✅");
 }
