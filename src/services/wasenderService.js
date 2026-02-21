@@ -1,70 +1,99 @@
 // src/services/wasenderService.js
 const axios = require("axios");
 
-const WASENDER_BASE_URL = process.env.WASENDER_BASE_URL; // ej: https://api.wasender.com
+const WASENDER_BASE = process.env.WASENDER_BASE_URL; // ej: https://api.wasender.com (según tu proveedor)
 const WASENDER_TOKEN = process.env.WASENDER_TOKEN;
 
-// Wasender: account protection => 1 msg / 5s
-const MIN_INTERVAL_MS = Number(process.env.WASENDER_MIN_INTERVAL_MS || 5200);
-const MAX_RETRIES_429 = Number(process.env.WASENDER_RETRY_429 || 2);
+const MIN_INTERVAL_MS = Number(process.env.WASENDER_MIN_INTERVAL_MS || 5200); // 5.2s seguro
+const MAX_RETRIES = Number(process.env.WASENDER_MAX_RETRIES || 3);
 
-// last sent per recipient
-const lastSentAt = new Map();
+// Cola por destinatario para no violar rate limit
+const queues = new Map(); // toE164 -> Promise chain
+const lastSentAt = new Map(); // toE164 -> timestamp
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 async function throttle(toE164) {
-  const key = String(toE164 || "");
-  const last = lastSentAt.get(key) || 0;
+  const last = lastSentAt.get(toE164) || 0;
   const now = Date.now();
-  const wait = MIN_INTERVAL_MS - (now - last);
+  const wait = Math.max(0, MIN_INTERVAL_MS - (now - last));
   if (wait > 0) await sleep(wait);
-  lastSentAt.set(key, Date.now());
 }
 
-// Extra: retry si Wasender responde 429 con retry_after
-async function sendText({ toE164, text }) {
-  const to = String(toE164 || "").trim();
-  const body = String(text || "");
-
-  if (!to) throw new Error("sendText: missing toE164");
-  if (!body) return;
-
-  // throttle por destinatario
-  await throttle(to);
-
-  let attempt = 0;
-
-  while (true) {
-    try {
-      const res = await axios.post(
-        `${WASENDER_BASE_URL}/send-message`,
-        { to, text: body },
-        { headers: { Authorization: `Bearer ${WASENDER_TOKEN}` }, timeout: 20000 }
-      );
-      return res.data;
-    } catch (err) {
-      const status = err?.response?.status;
-      const data = err?.response?.data;
-
-      // 429 protection
-      if (status === 429 && attempt < MAX_RETRIES_429) {
-        const retryAfterSec = Number(data?.retry_after ?? 3);
-        await sleep(Math.max(1, retryAfterSec) * 1000);
-        // importante: actualiza lastSentAt para no re-disparar demasiado rápido
-        lastSentAt.set(to, Date.now());
-        attempt++;
-        continue;
-      }
-
-      const msg = `Wasender send-message failed: ${status || "?"} ${JSON.stringify(data || {})}`;
-      const e = new Error(msg);
-      e.cause = err;
-      throw e;
-    }
+async function _sendTextOnce({ toE164, text }) {
+  if (!WASENDER_BASE || !WASENDER_TOKEN) {
+    throw new Error("WASENDER_BASE_URL / WASENDER_TOKEN missing");
   }
+
+  // 👇 Ajusta el endpoint/body a tu API real
+  const url = `${WASENDER_BASE}/send-message`;
+
+  const res = await axios.post(
+    url,
+    { to: toE164, text },
+    {
+      headers: {
+        Authorization: `Bearer ${WASENDER_TOKEN}`,
+        "Content-Type": "application/json"
+      },
+      timeout: 20000
+    }
+  );
+
+  return res.data;
+}
+
+async function sendText({ toE164, text }) {
+  const msg = String(text || "").trim();
+  if (!toE164 || !msg) return { ok: true, skipped: true };
+
+  // Encadena por destinatario (serializa envíos)
+  const prev = queues.get(toE164) || Promise.resolve();
+
+  const task = prev
+    .catch(() => {}) // si el anterior falló, no rompas la cola
+    .then(async () => {
+      // throttle duro
+      await throttle(toE164);
+
+      let attempt = 0;
+      while (attempt <= MAX_RETRIES) {
+        try {
+          const out = await _sendTextOnce({ toE164, text: msg });
+          lastSentAt.set(toE164, Date.now());
+          return { ok: true, data: out };
+        } catch (e) {
+          const status = e?.response?.status;
+          const body = e?.response?.data;
+          const retryAfter =
+            Number(body?.retry_after) ||
+            Number(e?.response?.headers?.["retry-after"]) ||
+            0;
+
+          // ✅ Rate limit -> espera y reintenta
+          if (status === 429 && attempt < MAX_RETRIES) {
+            const waitMs = Math.max(1000, (retryAfter || 3) * 1000);
+            await sleep(waitMs + 250); // colchón
+            attempt++;
+            continue;
+          }
+
+          // otro error o ya sin retries
+          throw new Error(
+            `Wasender send-message failed: ${status || "ERR"} ${JSON.stringify(body || e?.message || e)}`
+          );
+        }
+      }
+    })
+    .finally(() => {
+      // si esta task es la última, limpia
+      if (queues.get(toE164) === task) queues.delete(toE164);
+    });
+
+  queues.set(toE164, task);
+  return task;
 }
 
 module.exports = { sendText };
