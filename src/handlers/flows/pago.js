@@ -14,7 +14,9 @@ function intro() {
 }
 
 function looksLikeYes(t) {
-  return /(si|sí|correcto|ok|va|confirmo|exacto|claro|así es)/i.test(String(t || "").trim());
+  return /(si|sí|correcto|ok|va|confirmo|exacto|claro|asi es|así es)/i.test(
+    String(t || "").trim()
+  );
 }
 function looksLikeNo(t) {
   return /(no|nel|incorrecto|equivocado|error|nope)/i.test(String(t || "").trim());
@@ -45,16 +47,10 @@ function normalizeMes(mesRaw) {
 }
 
 function normalizeMonto(montoRaw) {
-  // Acepta: "500", "$500", "500.00", "500,00", "1,200", "1200 mxn"
   const s = String(montoRaw || "").trim();
   if (!s) return "";
-
-  // Extrae primer número "lógico"
   const n = extractFirstNumber(s);
   if (!n) return "";
-
-  // Conserva como string "limpio"
-  // Si extractFirstNumber ya devuelve number, conviértelo a string.
   return String(n);
 }
 
@@ -62,26 +58,20 @@ async function safeParseMesMonto(text) {
   const clean = String(text || "").trim();
   if (!clean) return { mes: "", monto: "" };
 
-  // 1) intenta LLM (si falla, no pasa nada)
+  // 1) intenta LLM
   try {
     const parsed = await parsePaymentMesMonto(clean);
     const mes = normalizeMes(parsed?.mes);
     const monto = normalizeMonto(parsed?.monto);
     if (mes && monto) return { mes, monto };
-  } catch {
-    // ignore
-  }
+  } catch {}
 
-  // 2) fallback: detecta mes por texto
+  // 2) fallback local
   const mes = normalizeMes(clean);
-
-  // 3) fallback: monto por primer número
   const monto = normalizeMonto(clean);
-
   return { mes, monto };
 }
 
-// Extrae url + id + mime (compat con inbound.media actual)
 function pickMedia(inboundMedia) {
   const urls = inboundMedia?.urls || [];
   const items = inboundMedia?.items || [];
@@ -95,7 +85,6 @@ function pickMedia(inboundMedia) {
 }
 
 function buildAdminPaymentMsg(p) {
-  // “Bonito” en WhatsApp, corto y claro
   const lines = [
     `💵 *PAGO REGISTRADO* ${p.folio}`,
     ``,
@@ -105,10 +94,39 @@ function buildAdminPaymentMsg(p) {
     `*Tel:* ${p.phone_e164 || "N/A"}`,
     ``,
     `*Comprobante:*`,
-    // preferimos public_url (ya sin .enc)
     `${p.comprobante_public_url || p.comprobante_url || "N/A"}`,
   ];
   return lines.join("\n");
+}
+
+/**
+ * Registra el pago AHORA (sin esperar otro inbound).
+ * Esto evita que se quede colgado en step 4.
+ */
+async function registerPaymentNow({ session, data, phoneE164 }) {
+  // intenta convertir .enc a public url (si tienes storage habilitado)
+  const stored = await resolveAndStoreMedia({
+    providerUrl: data.comprobante_url,
+    mediaId: data.comprobante_media_id,
+    mime: data.comprobante_mime,
+    phoneE164,
+    kind: "payment_receipt",
+  });
+
+  const p = await createPayment({
+    phoneE164,
+    nombre: data.nombre,
+    mes: data.mes,
+    monto: data.monto,
+    comprobante_url: data.comprobante_url || null,
+    comprobante_media_id: data.comprobante_media_id || null,
+    comprobante_mime: data.comprobante_mime || null,
+    comprobante_public_url: stored?.publicUrl || null,
+  });
+
+  await notifyAdmin(buildAdminPaymentMsg(p));
+
+  return p;
 }
 
 // =====================
@@ -138,7 +156,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
   // STEP 2: mes+monto (o comprobante primero)
   if (step === 2) {
-    // Si mandó comprobante primero, avanzamos a pedir mes/monto
+    // Si mandó comprobante primero
     if (hasMediaUrls(inbound.media)) {
       const m = pickMedia(inbound.media);
       if (!m.url && !m.id) {
@@ -158,7 +176,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    // Si es texto, parse mes+monto
+    // Si es texto (mes+monto)
     if (!hasMinLen(txt, 3)) {
       await send("Ponme el *mes* y el *monto* (ej: *Enero 500*).");
       return;
@@ -177,7 +195,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     const next = { ...data, mes, monto };
     await updateSession({ step: 25, data: next });
-
     await send(`Solo para confirmar: *${mes}* por *$${monto}*. ¿Correcto?`);
     return;
   }
@@ -202,7 +219,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     const next = { ...data, mes, monto };
     await updateSession({ step: 25, data: next });
-
     await send(`Solo para confirmar: *${mes}* por *$${monto}*. ¿Correcto?`);
     return;
   }
@@ -210,20 +226,38 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   // STEP 25: confirmación
   if (step === 25) {
     if (looksLikeYes(txt)) {
-      // si ya tenemos comprobante (ruta donde lo mandó primero), saltamos directo a guardar
-      if (data.comprobante_url || data.comprobante_media_id) {
-        await updateSession({ step: 4, data });
+      // ✅ Si ya existe comprobante, registramos AHORA mismo (no esperar otro inbound)
+      const hasReceipt = !!(data.comprobante_url || data.comprobante_media_id);
+
+      if (hasReceipt) {
         await send("Perfecto ✅ Estoy registrando tu pago…");
-      } else {
-        await updateSession({ step: 3, data });
-        await send("Listo ✅ Envíame el *comprobante* (foto o PDF) 📎");
+
+        try {
+          const p = await registerPaymentNow({ session, data, phoneE164 });
+          await closeSession(session.session_id);
+          await send(`¡Gracias! ✅ Pago registrado.\nFolio: *${p.folio}*`);
+          return;
+        } catch (e) {
+          // No cierres sesión si falló, para que pueda reintentar
+          await send(
+            "Uy 😅 tuve un problema registrando el pago.\n" +
+              "¿Me reenvías el comprobante y el mes/monto? (ej: *Enero 500*)"
+          );
+          await updateSession({ step: 2, data: { ...data } });
+          return;
+        }
       }
+
+      // Si aún no hay comprobante, lo pedimos
+      await updateSession({ step: 3, data });
+      await send("Listo ✅ Envíame el *comprobante* (foto o PDF) 📎");
       return;
     }
 
     if (looksLikeNo(txt)) {
-      // deja el comprobante si ya existía, solo resetea mes/monto
-      await updateSession({ step: data.comprobante_url || data.comprobante_media_id ? 22 : 2, data: { ...data, mes: null, monto: null } });
+      // si ya tenemos comprobante, regresamos a 22, si no a 2
+      const backStep = data.comprobante_url || data.comprobante_media_id ? 22 : 2;
+      await updateSession({ step: backStep, data: { ...data, mes: null, monto: null } });
       await send("Va 🙂 corrígeme por favor. ¿De qué mes fue y cuánto pagaste? (ej: *Enero 500*)");
       return;
     }
@@ -252,39 +286,21 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       comprobante_mime: m.mimetype || null,
     };
 
-    await updateSession({ step: 4, data: next });
     await send("Perfecto ✅ Estoy registrando tu pago…");
-    return;
-  }
 
-  // STEP 4: crear payment + notificar admin
-  if (step === 4) {
-    // 1) Resolver comprobante a public url (para evitar .enc)
-    // - si no tienes storage aún, resolverAndStoreMedia regresa null y se queda el url original
-    const stored = await resolveAndStoreMedia({
-      providerUrl: data.comprobante_url,
-      mediaId: data.comprobante_media_id,
-      mime: data.comprobante_mime,
-      phoneE164,
-      kind: "payment_receipt",
-    });
-
-    const p = await createPayment({
-      phoneE164,
-      nombre: data.nombre,
-      mes: data.mes,
-      monto: data.monto,
-      comprobante_url: data.comprobante_url || null,
-      comprobante_media_id: data.comprobante_media_id || null,
-      comprobante_mime: data.comprobante_mime || null,
-      comprobante_public_url: stored?.publicUrl || null,
-    });
-
-    await notifyAdmin(buildAdminPaymentMsg(p));
-
-    await closeSession(session.session_id);
-    await send(`¡Gracias! ✅ Pago registrado.\nFolio: *${p.folio}*`);
-    return;
+    try {
+      const p = await registerPaymentNow({ session, data: next, phoneE164 });
+      await closeSession(session.session_id);
+      await send(`¡Gracias! ✅ Pago registrado.\nFolio: *${p.folio}*`);
+      return;
+    } catch (e) {
+      await send(
+        "Uy 😅 tuve un problema registrando el pago.\n" +
+          "¿Me lo reenvías como *foto o PDF* y dime *mes+monto*? (ej: *Enero 500*)"
+      );
+      await updateSession({ step: 2, data: { ...data, ...next } });
+      return;
+    }
   }
 
   await closeSession(session.session_id);
