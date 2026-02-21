@@ -11,8 +11,6 @@ const { notifyAdmin, buildNewContractAdminMsg } = require("../../services/notify
 const { parsePhoneE164 } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
 
-const { storeToR2 } = require("../../services/r2UploadService");
-
 // Variación opcional
 let templates, pick;
 try {
@@ -59,9 +57,10 @@ function confirmColonia(col, seed) {
 }
 
 // Extrae url + (si existe) id/mime de un media.
+// Mantiene compatibilidad con tu inbound.media actual.
 function pickMedia(inboundMedia) {
   const urls = inboundMedia?.urls || [];
-  const items = inboundMedia?.items || [];
+  const items = inboundMedia?.items || []; // por si en el futuro agregas items
   const first = items?.[0] || null;
 
   return {
@@ -80,7 +79,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   const phoneE164 = session.phone_e164 || inbound.phoneE164;
   const txt = String(inbound.text || "").trim();
 
-  // STEP 1: resolver colonia
+  // STEP 1: resolver colonia (DB-first)
   if (step === 1) {
     if (!hasMinLen(txt, 2)) {
       await send(intro(phoneE164));
@@ -90,6 +89,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     const res = await resolveColonia(txt, { limit: 5 });
 
     if (!res.ok) {
+      // si mandó "Hidalgo 311" sin colonia, pide colonia
       if (looksLikeAddress(txt) && !/(col\.?|colonia|centro|morelos|americ)/i.test(txt)) {
         await send("¿En qué *colonia* queda esa calle? (Ej: Centro)");
         return;
@@ -98,6 +98,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
+    // si es suficientemente claro, aceptamos y pedimos calle+número
     if (res.autoAccept) {
       const nextData = {
         ...data,
@@ -113,6 +114,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
+    // si hay duda, pedimos confirmación con el mejor match
     const nextData = {
       ...data,
       colonia_input: txt,
@@ -205,7 +207,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
-  // STEP 4: INE frente (sube a R2)
+  // STEP 4: INE frente
   if (step === 4) {
     if (!hasMediaUrls(inbound.media)) {
       await send("Necesito la *foto del frente* de la INE 📸 (envíala como imagen, porfa)");
@@ -218,29 +220,13 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    // ✅ Subir a R2 (y guardamos URL pública)
-    let uploaded;
-    try {
-      uploaded = await storeToR2({
-        url: m.url,
-        mimetype: m.mimetype || "",
-        folder: "contracts/ine",
-        filenamePrefix: "ine_frente",
-        phoneE164
-      });
-    } catch (e) {
-      await send("Tuve un tema guardando la imagen 😅 ¿Me la reenvías por favor?");
-      return;
-    }
-
     await updateSession({
       step: 5,
       data: {
         ...data,
-        ine_frente_url: uploaded.publicUrl, // ✅ pública
+        ine_frente_url: m.url,
         ine_frente_media_id: m.id || null,
-        ine_frente_mime: uploaded.contentType || m.mimetype || null,
-        ine_frente_source_url: m.url // opcional: por si quieres auditar
+        ine_frente_mime: m.mimetype || null
       }
     });
 
@@ -248,7 +234,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
-  // STEP 5: INE atrás + crear contrato (sube a R2)
+  // STEP 5: INE atrás + crear contrato
   if (step === 5) {
     if (!hasMediaUrls(inbound.media)) {
       await send("Necesito la *foto de atrás* de la INE 📸 (envíala como imagen, porfa)");
@@ -261,15 +247,12 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    // ✅ Anti-duplicado
+    // ✅ Anti-duplicado (mismo archivo que el frente)
+    const sameUrl = data.ine_frente_url && m.url === data.ine_frente_url;
     const sameId =
       data.ine_frente_media_id && m.id && String(m.id) === String(data.ine_frente_media_id);
 
-    // Si no hay id, comparamos contra la URL fuente del frente (no la pública)
-    const sameUrl =
-      data.ine_frente_source_url && m.url && String(m.url) === String(data.ine_frente_source_url);
-
-    if (sameId || sameUrl) {
+    if (sameUrl || sameId) {
       await send(
         "Me llegó la misma imagen que la del *frente* 😅\n" +
           "¿Me reenvías la foto de la INE *por atrás*? 📸"
@@ -277,49 +260,32 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    // ✅ Subir a R2
-    let uploaded;
-    try {
-      uploaded = await storeToR2({
-        url: m.url,
-        mimetype: m.mimetype || "",
-        folder: "contracts/ine",
-        filenamePrefix: "ine_reverso",
-        phoneE164
-      });
-    } catch (e) {
-      await send("Tuve un tema guardando la imagen 😅 ¿Me la reenvías por favor?");
-      return;
-    }
-
     const finalData = {
       ...data,
-      ine_reverso_url: uploaded.publicUrl, // ✅ pública
+      ine_reverso_url: m.url,
       ine_reverso_media_id: m.id || null,
-      ine_reverso_mime: uploaded.contentType || m.mimetype || null,
-      ine_reverso_source_url: m.url // opcional
+      ine_reverso_mime: m.mimetype || null
     };
 
     const c = await createContract({
       phoneE164,
       nombre: finalData.nombre,
       colonia: finalData.colonia,
-      calle_numero: finalData.calle_numero,
+      calle_numero: finalData.calle_numero, // ✅
       telefono_contacto: finalData.telefono_contacto,
-
-      // ✅ ya NO son .enc
       ine_frente_url: finalData.ine_frente_url,
       ine_reverso_url: finalData.ine_reverso_url,
-
-      // opcionales
+      // opcionales (solo si tu DB/insert los soporta)
       ine_frente_media_id: finalData.ine_frente_media_id,
       ine_reverso_media_id: finalData.ine_reverso_media_id,
       ine_frente_mime: finalData.ine_frente_mime,
       ine_reverso_mime: finalData.ine_reverso_mime
     });
 
+    // ✅ Notificación admin PRO (y que se vea bonito en WhatsApp)
     await notifyAdmin(buildNewContractAdminMsg(c));
 
+    // ✅ Cierra sesión ANTES del último send para evitar “proceso abierto” si falla el envío
     await closeSession(session.session_id);
 
     await send(
