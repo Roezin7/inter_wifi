@@ -1,9 +1,6 @@
 // src/services/sessionsService.js
 const { query } = require("../db");
 
-/**
- * Helper: si viene client úsalo, si no usa query() normal
- */
 function q(client) {
   return client ? client.query.bind(client) : query;
 }
@@ -24,8 +21,6 @@ async function getOpenSessionByPhone(phoneE164, client = null) {
 async function createSession({ phoneE164, flow, step = 1, data = {} }, client = null) {
   const run = q(client);
 
-  // ✅ cierra cualquier OPEN previo
-  // (requiere columna closed_at; si no existe, quítala)
   await run(
     `update wa_sessions
      set status='CLOSED', closed_at=now(), updated_at=now()
@@ -42,7 +37,7 @@ async function createSession({ phoneE164, flow, step = 1, data = {} }, client = 
     [sessionId, phoneE164, flow, step, JSON.stringify(data)]
   );
 
-  return rows[0];
+  return rows[0] || null;
 }
 
 async function updateSession({ sessionId, step, data }, client = null) {
@@ -73,7 +68,7 @@ async function lockSession(sessionId, client = null) {
     `select session_id, phone_e164, flow, step, data, status
      from wa_sessions
      where session_id=$1 and status='OPEN'
-     for update`,
+     for update skip locked`,
     [sessionId]
   );
   return rows[0] || null;
