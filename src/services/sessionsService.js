@@ -21,6 +21,7 @@ async function getOpenSessionByPhone(phoneE164, client = null) {
 async function createSession({ phoneE164, flow, step = 1, data = {} }, client = null) {
   const run = q(client);
 
+  // cierra cualquier OPEN anterior (hard reset)
   await run(
     `update wa_sessions
      set status='CLOSED', closed_at=now(), updated_at=now()
@@ -100,5 +101,5 @@ module.exports = {
   updateSession,
   closeSession,
   lockSession,
-  closeIfTimedOut
+  closeIfTimedOut,
 };

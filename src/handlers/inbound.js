@@ -90,7 +90,6 @@ function isGreetingOnly(text) {
   const t = norm(text);
   if (!t) return false;
 
-  // si trae intención, NO lo trates como saludo-only
   const hasBusiness =
     /(contrat|internet|pago|pagos|falla|deposit|transfer|plan|paquete|horario|direccion|ubic|ubicacion|precio)/i.test(t);
   if (hasBusiness) return false;
@@ -110,11 +109,12 @@ function isAgentWord(text) {
   return /^(agente|asesor|humano|persona|soporte humano|representante|help)$/i.test(norm(text));
 }
 
+// ✅ NUEVO: “continuar” explícito
 function isContinueWord(text) {
-  return /^(continuar|continua|seguir|sigue|dale|ok continuar|ok seguimos|seguimos)$/i.test(norm(text));
+  return /^(continuar|continua|seguir|sigue|dale|va|ok|listo|continue)$/i.test(norm(text));
 }
 
-// Menú principal: 1-4 (NO incluye submenús)
+// Menú principal: 1-4
 function parseMainMenuChoice(text) {
   const t = norm(text);
   if (t === "1") return "CONTRATO";
@@ -125,39 +125,34 @@ function parseMainMenuChoice(text) {
 }
 
 /**
- * Intent “FAQ pagos” vs “PAGO registrar”
- * - FAQ cuando preguntan “formas de pago”, “cómo pagar”, “transferencia”, “depósito”, “cuenta”, etc.
- * - PAGO solo cuando quieren registrar/confirmar y/o mandar comprobante
+ * Intent fast
+ * - FAQ SIEMPRE GANA cuando el texto es claramente info.
+ * - PAGO solo si es “registrar pago / comprobante / ya pagué”
  */
 function mapIntentFast(text) {
   const t = norm(text);
 
-  // ========= FAQ (INFO) SIEMPRE GANA PRIMERO =========
-  if (/(formas de pago|forma de pago|como pagar|cómo pagar|donde pagar|dónde pagar|metodos de pago|métodos de pago)/i.test(t)) {
-    return "FAQ";
-  }
+  // FAQ win
+  if (/(formas de pago|forma de pago|como pagar|cómo pagar|donde pagar|dónde pagar|metodos de pago|métodos de pago)/i.test(t)) return "FAQ";
+  if (/(transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|spin|azteca|banco|beneficiario)/i.test(t)) return "FAQ";
+  if (/(horario|horarios|ubicacion|ubicación|direccion|dirección|precio|precios|paquete|paquetes|plan|planes|info|informacion|información)/i.test(t)) return "FAQ";
 
-  if (/(transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|spin|azteca|banco|beneficiario)/i.test(t)) {
-    return "FAQ";
-  }
+  // pago registro
+  if (/(registrar pago|reportar pago|confirmar pago|ya pague|ya pagué|pague|pagué|adjunto|te envio|te envío|mando|envio comprobante|envío comprobante|comprobante|ticket|captura|recibo)/i.test(t)) return "PAGO";
 
-  if (/(horario|horarios|ubicacion|ubicación|direccion|dirección|donde|dónde|precio|precios|paquete|paquetes|plan|planes|info|informacion|información)/i.test(t)) {
-    return "FAQ";
-  }
-
-  // ========= PAGO (REGISTRO) SOLO SI ES REGISTRO =========
-  if (/(registrar pago|reportar pago|confirmar pago|ya pague|ya pagué|pague|pagué|adjunto|te envio|te envío|mando|envio comprobante|envío comprobante|comprobante|ticket|captura|recibo)/i.test(t)) {
-    return "PAGO";
-  }
-
-  // ========= Otros =========
   if (/(contrat|internet|instal|nuevo servicio)/i.test(t)) return "CONTRATO";
   if (/(falla|sin internet|no funciona|intermit|lento)/i.test(t)) return "FALLA";
 
-  // “pago(s)” solo => ambigüo => mejor FAQ (evita que pregunte nombre del servicio)
+  // “pago(s)” solo => FAQ
   if (/^pago(s)?$/.test(t)) return "FAQ";
 
   return null;
+}
+
+// ✅ NUEVO: “FAQ override” aunque haya sesión
+function shouldForceFaqSwitch(text) {
+  const t = norm(text);
+  return /(formas de pago|forma de pago|como pagar|cómo pagar|metodos de pago|métodos de pago|transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|banco|beneficiario|horario|horarios|ubicacion|ubicación|direccion|dirección|precio|precios|paquete|paquetes|plan|planes|informacion|información|info)/i.test(t);
 }
 
 function getIntro(flow, inbound) {
@@ -167,52 +162,6 @@ function getIntro(flow, inbound) {
   return faq.intro();
 }
 
-function safeData(d) {
-  if (!d) return {};
-  if (typeof d === "object") return d;
-  try { return JSON.parse(d); } catch { return {}; }
-}
-
-/**
- * ✅ Re-prompt cuando el usuario dice "continuar" para no mandar "continuar"
- * como input al flow (ej: PAGO step 2 lo interpretaría como mes/monto).
- */
-function resumePrompt(flow, step, data, inbound) {
-  const f = String(flow || "").toUpperCase();
-  const s = Number(step || 1);
-
-  if (f === "PAGO") {
-    if (s === 1) return "Perfecto ✅ ¿A nombre de quién está el servicio?";
-    if (s === 2) return (
-      "Gracias. ¿De qué *mes* es el pago y de cuánto fue?\n" +
-      "Ejemplo: *Enero 500*\n\n" +
-      "Tip: también puedes mandar el *comprobante* primero 📎"
-    );
-    if (s === 22) return "Listo ✅ Ahora dime: ¿de qué *mes* fue y de cuánto? (ej: *Enero 500*)";
-    if (s === 25) return `Solo para confirmar: *${data?.mes || "N/A"}* por *$${data?.monto || "N/A"}*. ¿Correcto?`;
-    if (s === 3) return "Listo ✅ Envíame el *comprobante* (foto o PDF) 📎";
-  }
-
-  if (f === "FALLA") {
-    if (s === 1) return falla.intro();
-    if (s === 2) return "Perfecto. ¿A nombre de quién está el servicio?";
-    if (s === 3) return "Gracias. Cuéntame qué pasa y desde cuándo (una frase está bien).";
-  }
-
-  if (f === "CONTRATO") {
-    if (s === 1) return contrato.intro(inbound.phoneE164);
-    if (s === 10) return "¿Me confirmas con *sí* o *no*? 🙂";
-    if (s === 11) return "¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)";
-    if (s === 2) return "Excelente ✅ ¿Cuál es tu *nombre completo*?";
-    if (s === 3) return "Perfecto. ¿Qué *teléfono* dejamos de contacto? (10 dígitos o escribe *mismo*)";
-    if (s === 4) return "Listo ✅ Ahora envíame foto de tu *INE (frente)* 📸";
-    if (s === 5) return "Gracias. Ahora envíame la foto de tu *INE (atrás)* 📸";
-  }
-
-  // FAQ u otros
-  return getIntro(f, inbound);
-}
-
 // =====================
 // Main
 // =====================
@@ -220,7 +169,6 @@ async function handleInbound({ inbound, send }) {
   const inboundText = String(inbound.text || "").trim();
   const providerMsgId = inbound.providerMsgId || null;
 
-  // IN idempotente (DB debe tener UNIQUE(provider_msg_id))
   const inserted = await insertWaMessage({
     sessionId: null,
     phoneE164: inbound.phoneE164,
@@ -235,7 +183,6 @@ async function handleInbound({ inbound, send }) {
   async function sendAndLog({ sessionId, flow, step, kind, text }) {
     let msg = String(text || "").trim();
 
-    // polish best-effort
     try {
       const out = await polishReply({
         intent: flow,
@@ -250,7 +197,6 @@ async function handleInbound({ inbound, send }) {
     try {
       if (msg) await send(msg);
     } catch (e) {
-      // NO rompas el flujo por un error de envío
       logEvent({
         event: "send_failed",
         intent: flow,
@@ -286,7 +232,6 @@ async function handleInbound({ inbound, send }) {
     await client.query("BEGIN");
 
     let existing = await getOpenSessionByPhone(inbound.phoneE164, client);
-    if (existing) existing.data = safeData(existing.data);
 
     logEvent({
       event: "incoming_message",
@@ -298,13 +243,10 @@ async function handleInbound({ inbound, send }) {
       text: norm(inboundText).slice(0, 140)
     });
 
-    // ===== timeout auto =====
+    // timeout
     if (existing) {
       const timedOut = await closeIfTimedOut(existing, SESSION_TIMEOUT_MIN, client);
-      if (timedOut) {
-        logEvent({ event: "session_timeout", session_id: existing.session_id, phone: maskPhone(inbound.phoneE164) });
-        existing = null;
-      }
+      if (timedOut) existing = null;
     }
 
     const mainChoice = parseMainMenuChoice(inboundText);
@@ -313,7 +255,6 @@ async function handleInbound({ inbound, send }) {
     // NO SESSION
     // =====================
     if (!existing) {
-      // prioridad: comandos
       if (isCancelWord(inboundText)) {
         await client.query("COMMIT");
         await sendAndLog({
@@ -344,7 +285,6 @@ async function handleInbound({ inbound, send }) {
         return;
       }
 
-      // prioridad: números 1-4 (menú principal)
       if (mainChoice) {
         const flow = mainChoice;
         const session = await createSession(
@@ -362,7 +302,6 @@ async function handleInbound({ inbound, send }) {
         return;
       }
 
-      // saludo / menu / vacío => menú sin sesión
       if (!inboundText || isGreetingOnly(inboundText) || isMenuWord(inboundText)) {
         await client.query("COMMIT");
         await sendAndLog({
@@ -375,7 +314,6 @@ async function handleInbound({ inbound, send }) {
         return;
       }
 
-      // ruteo: fast → LLM con umbral
       let flow = mapIntentFast(inboundText);
 
       if (!flow) {
@@ -415,8 +353,11 @@ async function handleInbound({ inbound, send }) {
     // =====================
     // SESSION EXISTS
     // =====================
+    const existingFlow = String(existing.flow || "").toUpperCase();
+    const menuMode = Boolean(existing?.data?.menu_mode);
+    const isFaqSession = existingFlow === "FAQ";
 
-    // comandos primero
+    // cancel
     if (isCancelWord(inboundText)) {
       await closeSession(existing.session_id, client, "user_cancel");
       await client.query("COMMIT");
@@ -430,6 +371,7 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
+    // agent
     if (isAgentWord(inboundText)) {
       await closeSession(existing.session_id, client, "agent_requested");
       await client.query("COMMIT");
@@ -452,112 +394,79 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // ✅ continuar: re-prompt sin mandar "continuar" al flow
+    // ✅ FIX: si responde “continuar”, NO mandes greeting otra vez
     if (isContinueWord(inboundText)) {
-      // apagamos menu_mode y pending_flow si existían
-      await updateSession(
-        {
-          sessionId: existing.session_id,
-          step: existing.step,
-          data: { ...(existing.data || {}), menu_mode: false, pending_flow: null }
-        },
-        client
-      );
-
-      await client.query("COMMIT");
-      await sendAndLog({
-        sessionId: existing.session_id,
-        flow: existing.flow,
-        step: existing.step,
-        kind: "resume_prompt",
-        text: resumePrompt(existing.flow, existing.step, existing.data || {}, inbound)
-      });
-      return;
-    }
-
-    // menú: solo muestra menú (NO cambia flow) y activa menu_mode temporal
-    if (isMenuWord(inboundText)) {
-      await updateSession(
-        {
-          sessionId: existing.session_id,
-          step: existing.step,
-          data: { ...(existing.data || {}), menu_mode: true, menu_mode_at: Date.now() }
-        },
-        client
-      );
-
-      await client.query("COMMIT");
-      await sendAndLog({
-        sessionId: existing.session_id,
-        flow: existing.flow,
-        step: existing.step,
-        kind: "menu_soft",
-        text: greetingWithSession(existing) + "\n\n" + menu(inbound.profileName)
-      });
-      return;
-    }
-
-    // saludo con sesión: no avances
-    if (isGreetingOnly(inboundText)) {
-      await client.query("COMMIT");
-      await sendAndLog({
-        sessionId: existing.session_id,
-        flow: existing.flow,
-        step: existing.step,
-        kind: "greeting_existing_session",
-        text: greetingWithSession(existing)
-      });
-      return;
-    }
-
-    // ====== ✅ INTENT SWITCH GUARD (FIX DEL BUG) ======
-    // Si el texto parece otro flow, NO lo mandes al handler actual.
-    // Pregunta: continuar o menú, y guarda pending_flow para el switch.
-    const detectedFast = mapIntentFast(inboundText);
-    const existingFlow = String(existing.flow || "").toUpperCase();
-    const menuMode = Boolean(existing?.data?.menu_mode);
-
-    if (detectedFast && detectedFast !== existingFlow && !menuMode) {
-      await updateSession(
-        {
-          sessionId: existing.session_id,
-          step: existing.step,
-          data: { ...(existing.data || {}), menu_mode: true, pending_flow: detectedFast, pending_flow_at: Date.now() }
-        },
-        client
-      );
-
-      await client.query("COMMIT");
-      await sendAndLog({
-        sessionId: existing.session_id,
-        flow: existing.flow,
-        step: existing.step,
-        kind: "intent_switch_guard",
-        text: greetingWithSession(existing)
-      });
-      return;
-    }
-
-    // ====== FIX CLAVE: números 1-4 con sesión abierta ======
-    // Regla PRO:
-    // - Si estás en FAQ: el handler FAQ decide (submenú). NO cambies flow.
-    // - Si NO estás en FAQ: solo cambia flow si el usuario está en menu_mode=true.
-    const isFaqSession = existingFlow === "FAQ";
-
-    if (mainChoice) {
-      if (isFaqSession) {
-        // No hacemos switch; el FAQ handler puede interpretar 1-4 internamente
+      if (menuMode) {
+        await updateSession(
+          { sessionId: existing.session_id, step: existing.step, data: { ...(existing.data || {}), menu_mode: false } },
+          client
+        );
+      }
+      // deja caer al handler del flow actual
+    } else {
+      // menú
+      if (isMenuWord(inboundText)) {
         await updateSession(
           {
             sessionId: existing.session_id,
             step: existing.step,
-            data: { ...(existing.data || {}), menu_mode: false, pending_flow: null }
+            data: { ...(existing.data || {}), menu_mode: true, menu_mode_at: Date.now() }
           },
           client
         );
-        // NO return; dejamos que el FAQ flow lo procese abajo
+
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: existing.session_id,
+          flow: existing.flow,
+          step: existing.step,
+          kind: "menu_soft",
+          text: greetingWithSession(existing) + "\n\n" + menu(inbound.profileName)
+        });
+        return;
+      }
+
+      // saludo
+      if (isGreetingOnly(inboundText)) {
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: existing.session_id,
+          flow: existing.flow,
+          step: existing.step,
+          kind: "greeting_existing_session",
+          text: greetingWithSession(existing)
+        });
+        return;
+      }
+    }
+
+    // ✅ FIX: “formas de pago / horarios / ubicación / precios” fuerzan FAQ aunque haya sesión
+    if (!isFaqSession && shouldForceFaqSwitch(inboundText)) {
+      await closeSession(existing.session_id, client, "switch_to_faq");
+      const newSession = await createSession(
+        { phoneE164: inbound.phoneE164, flow: "FAQ", step: 1, data: { menu_mode: false } },
+        client
+      );
+      await client.query("COMMIT");
+      await sendAndLog({
+        sessionId: newSession.session_id,
+        flow: "FAQ",
+        step: 1,
+        kind: "switch_flow_to_faq_by_text",
+        text: getIntro("FAQ", inbound)
+      });
+      return;
+    }
+
+    // números 1-4
+    if (mainChoice) {
+      if (isFaqSession) {
+        await updateSession(
+          { sessionId: existing.session_id, step: existing.step, data: { ...(existing.data || {}), menu_mode: false } },
+          client
+        );
+        // no return: lo procesa FAQ abajo
       } else if (menuMode) {
-        // switch permitido (solo si el usuario pidió menú antes o cayó en guard)
         await closeSession(existing.session_id, client, "switch_flow");
         const newSession = await createSession(
           { phoneE164: inbound.phoneE164, flow: mainChoice, step: 1, data: { menu_mode: false } },
@@ -572,29 +481,19 @@ async function handleInbound({ inbound, send }) {
           text: getIntro(mainChoice, inbound)
         });
         return;
-      } else {
-        // No menu_mode => NO cambiamos flow
       }
     }
 
-    // Si llega texto real, apagamos menu_mode (auto-expira)
-    if (menuMode) {
+    // si llega texto real, apaga menu_mode
+    if (menuMode && !isContinueWord(inboundText)) {
       await updateSession(
-        {
-          sessionId: existing.session_id,
-          step: existing.step,
-          data: { ...(existing.data || {}), menu_mode: false, pending_flow: null }
-        },
+        { sessionId: existing.session_id, step: existing.step, data: { ...(existing.data || {}), menu_mode: false } },
         client
       );
     }
 
-    // =====================
-    // lock + flow handle
-    // =====================
+    // lock + dispatch
     const locked = await lockSession(existing.session_id, client);
-    if (locked) locked.data = safeData(locked.data);
-
     if (!locked) {
       await client.query("COMMIT");
       await sendAndLog({
