@@ -7,7 +7,10 @@ const {
 } = require("../../utils/validators");
 
 const { createContract } = require("../../services/contractsService");
-const { notifyAdmin, buildNewContractAdminMsg } = require("../../services/notifyService");
+const {
+  notifyAdmin,
+  buildNewContractAdminMsg,
+} = require("../../services/notifyService");
 const { parsePhoneE164 } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
 const { storeToR2 } = require("../../services/r2UploadService");
@@ -30,7 +33,8 @@ function looksLikeAddress(text) {
 
   const hasNumber = /\d/.test(s);
   const hasComma = s.includes(",");
-  const hasColWord = /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
+  const hasColWord =
+    /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
 
   const words = s.split(/\s+/).filter(Boolean);
   if (words.length === 1 && !hasNumber) return false;
@@ -61,9 +65,10 @@ function splitColoniaAndAddress(text) {
   // Si parece solo dirección (tiene número, pero no coma y no "colonia/centro...")
   // ej: "Hidalgo 311"
   const hasNumber = /\d/.test(s);
-  const mentionsCol = /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro|morelos|am[eé]ricas)/i.test(
-    s
-  );
+  const mentionsCol =
+    /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro|morelos|am[eé]ricas)/i.test(
+      s
+    );
   if (hasNumber && !mentionsCol) {
     return { colonia: "", calleNum: s };
   }
@@ -118,7 +123,9 @@ function pickMedia(inboundMedia) {
 }
 
 function looksLikeYes(t) {
-  return /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(String(t || "").trim());
+  return /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(
+    String(t || "").trim()
+  );
 }
 function looksLikeNo(t) {
   return /(no|nel|incorrecto|equivocado|error)/i.test(String(t || "").trim());

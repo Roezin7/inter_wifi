@@ -30,14 +30,15 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   const data = session.data || {};
   const txt = String(inbound.text || "").trim();
 
+  // ✅ robusto
+  const phoneE164 = session.phone_e164 || inbound.phoneE164 || null;
+
   if (step === 1) {
-    // Acepta respuesta libre, pero si es muy corta pide dato clave
     if (!hasMinLen(txt, 2)) {
       await send("¿Me confirmas si estás *sin internet* o está *lento/intermitente*?");
       return;
     }
 
-    // Guardamos tipo (opcional)
     const tipo =
       /(sin internet|no hay internet|no tengo internet)/i.test(txt)
         ? "SIN_INTERNET"
@@ -46,7 +47,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         : "OTRO";
 
     await updateSession({ step: 2, data: { ...data, tipo } });
-
     await send("Perfecto. ¿A nombre de quién está el servicio?");
     return;
   }
@@ -58,7 +58,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     await updateSession({ step: 3, data: { ...data, nombre: txt } });
-
     await send("Gracias. Cuéntame qué pasa y desde cuándo (una frase está bien).");
     return;
   }
@@ -69,8 +68,16 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
+    if (!phoneE164) {
+      // súper raro, pero evita insertar basura
+      await send("Uy 😅 no pude identificar tu número. Escribe *menú* o *agente* por favor.");
+      // cerramos para evitar loops
+      await closeSession();
+      return;
+    }
+
     const r = await createReport({
-      phoneE164: session.phone_e164,
+      phoneE164,
       nombre: data.nombre,
       descripcion: txt
     });
@@ -78,18 +85,18 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     await notifyAdmin(
       `🛠️ REPORTE DE FALLA ${r.folio}\n` +
         `Nombre: ${r.nombre}\n` +
-        `Tel: ${session.phone_e164}\n` +
+        `Tel: ${phoneE164}\n` +
         `Tipo: ${data.tipo || "N/A"}\n` +
         `Descripción: ${r.descripcion}`
     );
 
-    // Cierra sesión y manda el mensaje estilo “imagen 2”
-    await closeSession(session.session_id);
+    // ✅ en tu ctx closeSession no recibe args
+    await closeSession();
     await send(buildFallaResumenMsg({ folio: r.folio }));
     return;
   }
 
-  await closeSession(session.session_id);
+  await closeSession();
   await send("Listo ✅ Si necesitas algo más, aquí estoy.");
 }
 

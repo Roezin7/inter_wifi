@@ -4,7 +4,7 @@ const {
   getFaqById,
   getFaqSummaryByGroup,
   norm,
-  canonicalIntent
+  canonicalIntent,
 } = require("../../services/faqService");
 
 function intro() {
@@ -28,7 +28,10 @@ function parseFaqChoice(text) {
 }
 
 function fixNewlines(s) {
-  return String(s || "").replace(/\\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+  return String(s || "")
+    .replace(/\\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function wrapPro(rawAnswer, category) {
@@ -36,10 +39,13 @@ function wrapPro(rawAnswer, category) {
   const cat = norm(category);
 
   const header =
-    cat === "info" ? "📌 *Información*\n\n" :
-    cat === "pagos" ? "💳 *Pagos*\n\n" :
-    cat === "precios" ? "💰 *Precios y paquetes*\n\n" :
-    "";
+    cat === "info"
+      ? "📌 *Información*\n\n"
+      : cat === "pagos"
+      ? "💳 *Pagos*\n\n"
+      : cat === "precios"
+      ? "💰 *Precios y paquetes*\n\n"
+      : "";
 
   return header + a;
 }
@@ -49,11 +55,6 @@ async function getSummary(groupKey) {
   return f?.answer ? wrapPro(f.answer, f.category) : null;
 }
 
-/**
- * IMPORTANTE:
- * - Aquí damos RESUMEN y cerramos sesión (NO follow-up state).
- * - Si el usuario quiere detalle, lo pide con palabras y vuelve a entrar como FAQ normal.
- */
 function paymentsDetailHint() {
   return (
     "\n\n¿Quieres más detalle? Puedes escribir:\n" +
@@ -85,7 +86,6 @@ async function handle({ session, inbound, send, closeSession }) {
 
   const choice = parseFaqChoice(text);
 
-  // ===== DETERMINÍSTICO POR MENÚ FAQ =====
   if (choice === "horarios") {
     const f = await getFaqById(4);
     if (f?.answer) await send(wrapPro(f.answer, f.category));
@@ -102,7 +102,6 @@ async function handle({ session, inbound, send, closeSession }) {
     return;
   }
 
-  // ✅ PAGOS (resumen corto tipo flyer) + hint + CIERRE
   if (choice === "pagos") {
     const summary = await getSummary("pagos");
     if (!summary) {
@@ -110,13 +109,11 @@ async function handle({ session, inbound, send, closeSession }) {
       await closeSession(session.session_id);
       return;
     }
-
     await send(summary + paymentsDetailHint());
     await closeSession(session.session_id);
     return;
   }
 
-  // ✅ PRECIOS/PAQUETES (resumen) + hint + CIERRE
   if (choice === "precios") {
     const summary = await getSummary("precios");
     if (!summary) {
@@ -124,14 +121,12 @@ async function handle({ session, inbound, send, closeSession }) {
       await closeSession(session.session_id);
       return;
     }
-
     await send(summary + pricesDetailHint());
     await closeSession(session.session_id);
     return;
   }
 
-  // ===== TEXTO LIBRE (match) =====
-  // si el texto es canónico (“pagos”, “precios”), manda resumen y cierra
+  // Texto libre
   const canon = canonicalIntent(text);
 
   if (canon === "pagos") {
@@ -152,7 +147,6 @@ async function handle({ session, inbound, send, closeSession }) {
     }
   }
 
-  // match normal contra FAQs DETAIL
   const threshold = Number(process.env.FAQ_MATCH_THRESHOLD || 0.62);
   const m = await matchFaq(text, threshold);
 
@@ -162,14 +156,13 @@ async function handle({ session, inbound, send, closeSession }) {
     return;
   }
 
-  // no match => manda intro y cierra (no dejes sesión abierta)
   await send(
     "Para ayudarte mejor, elige una opción:\n\n" +
-    "1) Horarios\n" +
-    "2) Ubicación\n" +
-    "3) Formas de pago\n" +
-    "4) Precios / paquetes\n\n" +
-    "O escribe tu duda (ej: “transferencia”, “ubicación”)."
+      "1) Horarios\n" +
+      "2) Ubicación\n" +
+      "3) Formas de pago\n" +
+      "4) Precios / paquetes\n\n" +
+      "O escribe tu duda (ej: “transferencia”, “ubicación”)."
   );
   await closeSession(session.session_id);
 }

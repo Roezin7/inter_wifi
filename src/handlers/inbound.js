@@ -8,7 +8,7 @@ const {
   lockSession,
   updateSession,
   closeSession,
-  closeIfTimedOut
+  closeIfTimedOut,
 } = require("../services/sessionsService");
 
 const { notifyAdmin } = require("../services/notifyService");
@@ -22,7 +22,7 @@ const faq = require("./flows/faq");
 // Config
 // =====================
 const SESSION_TIMEOUT_MIN = Number(process.env.SESSION_TIMEOUT_MIN || 20);
-const LLM_CONFIDENCE_MIN = Number(process.env.LLM_INTENT_MIN_CONF || 0.70);
+const LLM_CONFIDENCE_MIN = Number(process.env.LLM_INTENT_MIN_CONF || 0.7);
 
 // =====================
 // Copy / UI
@@ -45,9 +45,13 @@ function menu(profileName) {
 function greetingWithSession(existing) {
   const flow = String(existing?.flow || "").toUpperCase();
   const label =
-    flow === "CONTRATO" ? "contratación" :
-    flow === "PAGO" ? "registro de pago" :
-    flow === "FALLA" ? "reporte de falla" : "información";
+    flow === "CONTRATO"
+      ? "contratación"
+      : flow === "PAGO"
+      ? "registro de pago"
+      : flow === "FALLA"
+      ? "reporte de falla"
+      : "información";
 
   return (
     `¡Hola! 👋\n` +
@@ -68,11 +72,13 @@ function maskPhone(p) {
 }
 
 function logEvent(evt) {
-  console.log(JSON.stringify({
-    ts: new Date().toISOString(),
-    app: "interwifi-bot",
-    ...evt
-  }));
+  console.log(
+    JSON.stringify({
+      ts: new Date().toISOString(),
+      app: "interwifi-bot",
+      ...evt,
+    })
+  );
 }
 
 // =====================
@@ -91,10 +97,14 @@ function isGreetingOnly(text) {
   if (!t) return false;
 
   const hasBusiness =
-    /(contrat|internet|pago|pagos|falla|deposit|transfer|plan|paquete|horario|direccion|ubic|ubicacion|precio)/i.test(t);
+    /(contrat|internet|pago|pagos|falla|deposit|transfer|plan|paquete|horario|direccion|ubic|ubicacion|precio)/i.test(
+      t
+    );
   if (hasBusiness) return false;
 
-  return /^(hola|hol|hey|hi|ola|buenas|buenos dias|buen dia|buenas tardes|buenas noches|que tal|q tal|que onda)$/.test(t);
+  return /^(hola|hol|hey|hi|ola|buenas|buenos dias|buen dia|buenas tardes|buenas noches|que tal|q tal|que onda)$/.test(
+    t
+  );
 }
 
 function isMenuWord(text) {
@@ -109,9 +119,11 @@ function isAgentWord(text) {
   return /^(agente|asesor|humano|persona|soporte humano|representante|help)$/i.test(norm(text));
 }
 
-// ✅ NUEVO: “continuar” explícito
+// ✅ “continuar” explícito (IMPORTANT: NO debe caer al flow como respuesta)
 function isContinueWord(text) {
-  return /^(continuar|continua|seguir|sigue|dale|va|ok|listo|continue)$/i.test(norm(text));
+  return /^(continuar|continua|seguir|sigue|dale|va|ok continuar|listo continuar|continue)$/i.test(
+    norm(text)
+  );
 }
 
 // Menú principal: 1-4
@@ -133,12 +145,28 @@ function mapIntentFast(text) {
   const t = norm(text);
 
   // FAQ win
-  if (/(formas de pago|forma de pago|como pagar|cómo pagar|donde pagar|dónde pagar|metodos de pago|métodos de pago)/i.test(t)) return "FAQ";
-  if (/(transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|spin|azteca|banco|beneficiario)/i.test(t)) return "FAQ";
-  if (/(horario|horarios|ubicacion|ubicación|direccion|dirección|precio|precios|paquete|paquetes|plan|planes|info|informacion|información)/i.test(t)) return "FAQ";
+  if (
+    /(formas de pago|forma de pago|como pagar|cómo pagar|donde pagar|dónde pagar|metodos de pago|métodos de pago)/i.test(
+      t
+    )
+  )
+    return "FAQ";
+  if (/(transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|spin|azteca|banco|beneficiario)/i.test(t))
+    return "FAQ";
+  if (
+    /(horario|horarios|ubicacion|ubicación|direccion|dirección|precio|precios|paquete|paquetes|plan|planes|info|informacion|información)/i.test(
+      t
+    )
+  )
+    return "FAQ";
 
   // pago registro
-  if (/(registrar pago|reportar pago|confirmar pago|ya pague|ya pagué|pague|pagué|adjunto|te envio|te envío|mando|envio comprobante|envío comprobante|comprobante|ticket|captura|recibo)/i.test(t)) return "PAGO";
+  if (
+    /(registrar pago|reportar pago|confirmar pago|ya pague|ya pagué|pague|pagué|adjunto|te envio|te envío|mando|envio comprobante|envío comprobante|comprobante|ticket|captura|recibo)/i.test(
+      t
+    )
+  )
+    return "PAGO";
 
   if (/(contrat|internet|instal|nuevo servicio)/i.test(t)) return "CONTRATO";
   if (/(falla|sin internet|no funciona|intermit|lento)/i.test(t)) return "FALLA";
@@ -149,10 +177,12 @@ function mapIntentFast(text) {
   return null;
 }
 
-// ✅ NUEVO: “FAQ override” aunque haya sesión
+// ✅ “FAQ override” aunque haya sesión
 function shouldForceFaqSwitch(text) {
   const t = norm(text);
-  return /(formas de pago|forma de pago|como pagar|cómo pagar|metodos de pago|métodos de pago|transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|banco|beneficiario|horario|horarios|ubicacion|ubicación|direccion|dirección|precio|precios|paquete|paquetes|plan|planes|informacion|información|info)/i.test(t);
+  return /(formas de pago|forma de pago|como pagar|cómo pagar|metodos de pago|métodos de pago|transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|banco|beneficiario|horario|horarios|ubicacion|ubicación|direccion|dirección|precio|precios|paquete|paquetes|plan|planes|informacion|información|info)/i.test(
+    t
+  );
 }
 
 function getIntro(flow, inbound) {
@@ -176,7 +206,7 @@ async function handleInbound({ inbound, send }) {
     body: inboundText,
     media: inbound.media,
     raw: inbound.raw,
-    providerMsgId
+    providerMsgId,
   });
   if (!inserted) return;
 
@@ -189,7 +219,7 @@ async function handleInbound({ inbound, send }) {
         step,
         rawReply: msg,
         userText: inboundText,
-        profileName: inbound.profileName || ""
+        profileName: inbound.profileName || "",
       });
       if (out) msg = String(out).trim();
     } catch {}
@@ -204,7 +234,7 @@ async function handleInbound({ inbound, send }) {
         kind,
         error: String(e?.message || e),
         phone: maskPhone(inbound.phoneE164),
-        provider_msg_id: providerMsgId || null
+        provider_msg_id: providerMsgId || null,
       });
     }
 
@@ -213,7 +243,7 @@ async function handleInbound({ inbound, send }) {
       phoneE164: inbound.phoneE164,
       direction: "OUT",
       body: msg || null,
-      raw: { kind, flow, step }
+      raw: { kind, flow, step },
     });
 
     logEvent({
@@ -223,7 +253,7 @@ async function handleInbound({ inbound, send }) {
       step,
       session_id: sessionId || null,
       phone: maskPhone(inbound.phoneE164),
-      provider_msg_id: providerMsgId || null
+      provider_msg_id: providerMsgId || null,
     });
   }
 
@@ -240,7 +270,7 @@ async function handleInbound({ inbound, send }) {
       session_id: existing?.session_id || null,
       phone: maskPhone(inbound.phoneE164),
       provider_msg_id: providerMsgId || null,
-      text: norm(inboundText).slice(0, 140)
+      text: norm(inboundText).slice(0, 140),
     });
 
     // timeout
@@ -262,7 +292,7 @@ async function handleInbound({ inbound, send }) {
           flow: "MENU",
           step: 0,
           kind: "cancel_no_session",
-          text: `Listo ✅ No hay ningún proceso activo.\n\n${menu(inbound.profileName)}`
+          text: `Listo ✅ No hay ningún proceso activo.\n\n${menu(inbound.profileName)}`,
         });
         return;
       }
@@ -271,16 +301,16 @@ async function handleInbound({ inbound, send }) {
         await client.query("COMMIT");
         await notifyAdmin(
           `🧑‍💼 *SOLICITA AGENTE*\n` +
-          `Tel: ${inbound.phoneE164}\n` +
-          `Nombre: ${inbound.profileName || "N/A"}\n` +
-          `Mensaje: ${inboundText || "(sin texto)"}`
+            `Tel: ${inbound.phoneE164}\n` +
+            `Nombre: ${inbound.profileName || "N/A"}\n` +
+            `Mensaje: ${inboundText || "(sin texto)"}`
         );
         await sendAndLog({
           sessionId: null,
           flow: "MENU",
           step: 0,
           kind: "agent_no_session",
-          text: `Listo ✅ Ya avisé a un asesor. En breve te contactamos.\n\n${menu(inbound.profileName)}`
+          text: `Listo ✅ Ya avisé a un asesor. En breve te contactamos.\n\n${menu(inbound.profileName)}`,
         });
         return;
       }
@@ -297,7 +327,7 @@ async function handleInbound({ inbound, send }) {
           flow,
           step: 1,
           kind: "intro_by_number_no_session",
-          text: getIntro(flow, inbound)
+          text: getIntro(flow, inbound),
         });
         return;
       }
@@ -309,7 +339,7 @@ async function handleInbound({ inbound, send }) {
           flow: "MENU",
           step: 0,
           kind: "menu_no_session",
-          text: menu(inbound.profileName)
+          text: menu(inbound.profileName),
         });
         return;
       }
@@ -327,7 +357,7 @@ async function handleInbound({ inbound, send }) {
             flow: "MENU",
             step: 0,
             kind: "menu_low_conf",
-            text: `Para ayudarte mejor, elige una opción:\n\n${menu(inbound.profileName)}`
+            text: `Para ayudarte mejor, elige una opción:\n\n${menu(inbound.profileName)}`,
           });
           return;
         }
@@ -345,7 +375,7 @@ async function handleInbound({ inbound, send }) {
         flow,
         step: 1,
         kind: "intro_new_session",
-        text: getIntro(flow, inbound)
+        text: getIntro(flow, inbound),
       });
       return;
     }
@@ -366,7 +396,7 @@ async function handleInbound({ inbound, send }) {
         flow: "MENU",
         step: 0,
         kind: "cancel_reset",
-        text: `Listo ✅ Proceso cancelado.\n\n${menu(inbound.profileName)}`
+        text: `Listo ✅ Proceso cancelado.\n\n${menu(inbound.profileName)}`,
       });
       return;
     }
@@ -378,10 +408,10 @@ async function handleInbound({ inbound, send }) {
 
       await notifyAdmin(
         `🧑‍💼 *SOLICITA AGENTE*\n` +
-        `Tel: ${inbound.phoneE164}\n` +
-        `Nombre: ${inbound.profileName || "N/A"}\n` +
-        `Proceso: ${existing.flow} (step ${existing.step})\n` +
-        `Mensaje: ${inboundText || "(sin texto)"}`
+          `Tel: ${inbound.phoneE164}\n` +
+          `Nombre: ${inbound.profileName || "N/A"}\n` +
+          `Proceso: ${existing.flow} (step ${existing.step})\n` +
+          `Mensaje: ${inboundText || "(sin texto)"}`
       );
 
       await sendAndLog({
@@ -389,58 +419,83 @@ async function handleInbound({ inbound, send }) {
         flow: "MENU",
         step: 0,
         kind: "agent_requested",
-        text: `Listo ✅ Ya avisé a un asesor. En breve te contactamos.\n\n${menu(inbound.profileName)}`
+        text: `Listo ✅ Ya avisé a un asesor. En breve te contactamos.\n\n${menu(inbound.profileName)}`,
       });
       return;
     }
 
-    // ✅ FIX: si responde “continuar”, NO mandes greeting otra vez
+    // ✅ FIX PRINCIPAL: “menú” con sesión abierta -> NO mandes greeting+menú (eso se ve doble/bug)
+    if (isMenuWord(inboundText)) {
+      await updateSession(
+        {
+          sessionId: existing.session_id,
+          step: existing.step,
+          data: { ...(existing.data || {}), menu_mode: true, menu_mode_at: Date.now() },
+        },
+        client
+      );
+
+      const label =
+        existingFlow === "CONTRATO"
+          ? "contratación"
+          : existingFlow === "PAGO"
+          ? "registro de pago"
+          : existingFlow === "FALLA"
+          ? "reporte de falla"
+          : "información";
+
+      await client.query("COMMIT");
+      await sendAndLog({
+        sessionId: existing.session_id,
+        flow: existing.flow,
+        step: existing.step,
+        kind: "menu_soft",
+        text:
+          `📌 Tienes un proceso abierto de *${label}*.\n` +
+          `Responde *continuar* para seguir, o elige una opción:\n\n` +
+          menu(inbound.profileName),
+      });
+      return;
+    }
+
+    // saludo con sesión: no avances
+    if (isGreetingOnly(inboundText)) {
+      await client.query("COMMIT");
+      await sendAndLog({
+        sessionId: existing.session_id,
+        flow: existing.flow,
+        step: existing.step,
+        kind: "greeting_existing_session",
+        text: greetingWithSession(existing),
+      });
+      return;
+    }
+
+    // ✅ “continuar”: limpia menu_mode y NO lo pases al flow (para que no se tome como respuesta)
     if (isContinueWord(inboundText)) {
       if (menuMode) {
-        await updateSession(
-          { sessionId: existing.session_id, step: existing.step, data: { ...(existing.data || {}), menu_mode: false } },
-          client
-        );
-      }
-      // deja caer al handler del flow actual
-    } else {
-      // menú
-      if (isMenuWord(inboundText)) {
         await updateSession(
           {
             sessionId: existing.session_id,
             step: existing.step,
-            data: { ...(existing.data || {}), menu_mode: true, menu_mode_at: Date.now() }
+            data: { ...(existing.data || {}), menu_mode: false },
           },
           client
         );
-
-        await client.query("COMMIT");
-        await sendAndLog({
-          sessionId: existing.session_id,
-          flow: existing.flow,
-          step: existing.step,
-          kind: "menu_soft",
-          text: greetingWithSession(existing) + "\n\n" + menu(inbound.profileName)
-        });
-        return;
       }
 
-      // saludo
-      if (isGreetingOnly(inboundText)) {
-        await client.query("COMMIT");
-        await sendAndLog({
-          sessionId: existing.session_id,
-          flow: existing.flow,
-          step: existing.step,
-          kind: "greeting_existing_session",
-          text: greetingWithSession(existing)
-        });
-        return;
-      }
+      await client.query("COMMIT");
+      await sendAndLog({
+        sessionId: existing.session_id,
+        flow: existing.flow,
+        step: existing.step,
+        kind: "continue_session",
+        text: "Listo ✅",
+      });
+      return;
     }
 
-    // ✅ FIX: “formas de pago / horarios / ubicación / precios” fuerzan FAQ aunque haya sesión
+    // ✅ Si el usuario pide INFO (formas de pago/horarios/etc) en medio de otro flow: switch a FAQ
     if (!isFaqSession && shouldForceFaqSwitch(inboundText)) {
       await closeSession(existing.session_id, client, "switch_to_faq");
       const newSession = await createSession(
@@ -453,20 +508,26 @@ async function handleInbound({ inbound, send }) {
         flow: "FAQ",
         step: 1,
         kind: "switch_flow_to_faq_by_text",
-        text: getIntro("FAQ", inbound)
+        text: getIntro("FAQ", inbound),
       });
       return;
     }
 
-    // números 1-4
+    // ===== números 1-4 =====
     if (mainChoice) {
       if (isFaqSession) {
+        // FAQ interpreta 1-4 internamente
         await updateSession(
-          { sessionId: existing.session_id, step: existing.step, data: { ...(existing.data || {}), menu_mode: false } },
+          {
+            sessionId: existing.session_id,
+            step: existing.step,
+            data: { ...(existing.data || {}), menu_mode: false },
+          },
           client
         );
-        // no return: lo procesa FAQ abajo
+        // no return: cae a dispatch FAQ
       } else if (menuMode) {
+        // Switch solo si el usuario pidió menú antes
         await closeSession(existing.session_id, client, "switch_flow");
         const newSession = await createSession(
           { phoneE164: inbound.phoneE164, flow: mainChoice, step: 1, data: { menu_mode: false } },
@@ -478,21 +539,28 @@ async function handleInbound({ inbound, send }) {
           flow: mainChoice,
           step: 1,
           kind: "switch_flow_by_number",
-          text: getIntro(mainChoice, inbound)
+          text: getIntro(mainChoice, inbound),
         });
         return;
       }
+      // Si NO hay menu_mode => NO cambies flow (evita bugs por “1/2/3/4” accidentales)
     }
 
-    // si llega texto real, apaga menu_mode
-    if (menuMode && !isContinueWord(inboundText)) {
+    // si llega texto real, apaga menu_mode (para que no quede pegado)
+    if (menuMode) {
       await updateSession(
-        { sessionId: existing.session_id, step: existing.step, data: { ...(existing.data || {}), menu_mode: false } },
+        {
+          sessionId: existing.session_id,
+          step: existing.step,
+          data: { ...(existing.data || {}), menu_mode: false },
+        },
         client
       );
     }
 
+    // =====================
     // lock + dispatch
+    // =====================
     const locked = await lockSession(existing.session_id, client);
     if (!locked) {
       await client.query("COMMIT");
@@ -501,7 +569,7 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: "lock_failed",
-        text: menu(inbound.profileName)
+        text: menu(inbound.profileName),
       });
       return;
     }
@@ -515,13 +583,12 @@ async function handleInbound({ inbound, send }) {
           flow: locked.flow,
           step: locked.step,
           kind: "flow_reply",
-          text: textOut
+          text: textOut,
         });
       },
       updateSession: async ({ step, data }) =>
         updateSession({ sessionId: locked.session_id, step, data }, client),
-      closeSession: async () =>
-        closeSession(locked.session_id, client, "flow_done")
+      closeSession: async () => closeSession(locked.session_id, client, "flow_done"),
     };
 
     logEvent({
@@ -529,7 +596,7 @@ async function handleInbound({ inbound, send }) {
       intent: locked.flow,
       step: locked.step,
       session_id: locked.session_id,
-      phone: maskPhone(inbound.phoneE164)
+      phone: maskPhone(inbound.phoneE164),
     });
 
     if (locked.flow === "CONTRATO") await contrato.handle(ctx);
@@ -539,14 +606,16 @@ async function handleInbound({ inbound, send }) {
 
     await client.query("COMMIT");
   } catch (e) {
-    try { await client.query("ROLLBACK"); } catch {}
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
 
     logEvent({
       event: "webhook_error",
       error: String(e?.message || e),
       stack: String(e?.stack || "").slice(0, 2000),
       phone: maskPhone(inbound.phoneE164),
-      provider_msg_id: providerMsgId || null
+      provider_msg_id: providerMsgId || null,
     });
 
     throw e;
