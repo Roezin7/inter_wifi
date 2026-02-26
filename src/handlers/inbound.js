@@ -110,6 +110,10 @@ function isAgentWord(text) {
   return /^(agente|asesor|humano|persona|soporte humano|representante|help)$/i.test(norm(text));
 }
 
+function isContinueWord(text) {
+  return /^(continuar|continua|seguir|sigue|dale|ok continuar|ok seguimos|seguimos)$/i.test(norm(text));
+}
+
 // Menú principal: 1-4 (NO incluye submenús)
 function parseMainMenuChoice(text) {
   const t = norm(text);
@@ -163,6 +167,52 @@ function getIntro(flow, inbound) {
   return faq.intro();
 }
 
+function safeData(d) {
+  if (!d) return {};
+  if (typeof d === "object") return d;
+  try { return JSON.parse(d); } catch { return {}; }
+}
+
+/**
+ * ✅ Re-prompt cuando el usuario dice "continuar" para no mandar "continuar"
+ * como input al flow (ej: PAGO step 2 lo interpretaría como mes/monto).
+ */
+function resumePrompt(flow, step, data, inbound) {
+  const f = String(flow || "").toUpperCase();
+  const s = Number(step || 1);
+
+  if (f === "PAGO") {
+    if (s === 1) return "Perfecto ✅ ¿A nombre de quién está el servicio?";
+    if (s === 2) return (
+      "Gracias. ¿De qué *mes* es el pago y de cuánto fue?\n" +
+      "Ejemplo: *Enero 500*\n\n" +
+      "Tip: también puedes mandar el *comprobante* primero 📎"
+    );
+    if (s === 22) return "Listo ✅ Ahora dime: ¿de qué *mes* fue y de cuánto? (ej: *Enero 500*)";
+    if (s === 25) return `Solo para confirmar: *${data?.mes || "N/A"}* por *$${data?.monto || "N/A"}*. ¿Correcto?`;
+    if (s === 3) return "Listo ✅ Envíame el *comprobante* (foto o PDF) 📎";
+  }
+
+  if (f === "FALLA") {
+    if (s === 1) return falla.intro();
+    if (s === 2) return "Perfecto. ¿A nombre de quién está el servicio?";
+    if (s === 3) return "Gracias. Cuéntame qué pasa y desde cuándo (una frase está bien).";
+  }
+
+  if (f === "CONTRATO") {
+    if (s === 1) return contrato.intro(inbound.phoneE164);
+    if (s === 10) return "¿Me confirmas con *sí* o *no*? 🙂";
+    if (s === 11) return "¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)";
+    if (s === 2) return "Excelente ✅ ¿Cuál es tu *nombre completo*?";
+    if (s === 3) return "Perfecto. ¿Qué *teléfono* dejamos de contacto? (10 dígitos o escribe *mismo*)";
+    if (s === 4) return "Listo ✅ Ahora envíame foto de tu *INE (frente)* 📸";
+    if (s === 5) return "Gracias. Ahora envíame la foto de tu *INE (atrás)* 📸";
+  }
+
+  // FAQ u otros
+  return getIntro(f, inbound);
+}
+
 // =====================
 // Main
 // =====================
@@ -198,19 +248,19 @@ async function handleInbound({ inbound, send }) {
     } catch {}
 
     try {
-  if (msg) await send(msg);
-} catch (e) {
-  // NO rompas el flujo por un error de envío
-  logEvent({
-    event: "send_failed",
-    intent: flow,
-    step,
-    kind,
-    error: String(e?.message || e),
-    phone: maskPhone(inbound.phoneE164),
-    provider_msg_id: providerMsgId || null
-  });
-}
+      if (msg) await send(msg);
+    } catch (e) {
+      // NO rompas el flujo por un error de envío
+      logEvent({
+        event: "send_failed",
+        intent: flow,
+        step,
+        kind,
+        error: String(e?.message || e),
+        phone: maskPhone(inbound.phoneE164),
+        provider_msg_id: providerMsgId || null
+      });
+    }
 
     await insertWaMessage({
       sessionId: sessionId || null,
@@ -236,6 +286,7 @@ async function handleInbound({ inbound, send }) {
     await client.query("BEGIN");
 
     let existing = await getOpenSessionByPhone(inbound.phoneE164, client);
+    if (existing) existing.data = safeData(existing.data);
 
     logEvent({
       event: "incoming_message",
@@ -256,8 +307,6 @@ async function handleInbound({ inbound, send }) {
       }
     }
 
-    // IMPORTANTE:
-    // choice = SOLO menú principal. No lo uses para “submenús” como FAQ.
     const mainChoice = parseMainMenuChoice(inboundText);
 
     // =====================
@@ -403,6 +452,29 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
+    // ✅ continuar: re-prompt sin mandar "continuar" al flow
+    if (isContinueWord(inboundText)) {
+      // apagamos menu_mode y pending_flow si existían
+      await updateSession(
+        {
+          sessionId: existing.session_id,
+          step: existing.step,
+          data: { ...(existing.data || {}), menu_mode: false, pending_flow: null }
+        },
+        client
+      );
+
+      await client.query("COMMIT");
+      await sendAndLog({
+        sessionId: existing.session_id,
+        flow: existing.flow,
+        step: existing.step,
+        kind: "resume_prompt",
+        text: resumePrompt(existing.flow, existing.step, existing.data || {}, inbound)
+      });
+      return;
+    }
+
     // menú: solo muestra menú (NO cambia flow) y activa menu_mode temporal
     if (isMenuWord(inboundText)) {
       await updateSession(
@@ -438,28 +510,54 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
+    // ====== ✅ INTENT SWITCH GUARD (FIX DEL BUG) ======
+    // Si el texto parece otro flow, NO lo mandes al handler actual.
+    // Pregunta: continuar o menú, y guarda pending_flow para el switch.
+    const detectedFast = mapIntentFast(inboundText);
+    const existingFlow = String(existing.flow || "").toUpperCase();
+    const menuMode = Boolean(existing?.data?.menu_mode);
+
+    if (detectedFast && detectedFast !== existingFlow && !menuMode) {
+      await updateSession(
+        {
+          sessionId: existing.session_id,
+          step: existing.step,
+          data: { ...(existing.data || {}), menu_mode: true, pending_flow: detectedFast, pending_flow_at: Date.now() }
+        },
+        client
+      );
+
+      await client.query("COMMIT");
+      await sendAndLog({
+        sessionId: existing.session_id,
+        flow: existing.flow,
+        step: existing.step,
+        kind: "intent_switch_guard",
+        text: greetingWithSession(existing)
+      });
+      return;
+    }
+
     // ====== FIX CLAVE: números 1-4 con sesión abierta ======
     // Regla PRO:
     // - Si estás en FAQ: el handler FAQ decide (submenú). NO cambies flow.
     // - Si NO estás en FAQ: solo cambia flow si el usuario está en menu_mode=true.
-    const isFaqSession = String(existing.flow || "").toUpperCase() === "FAQ";
-    const menuMode = Boolean(existing?.data?.menu_mode);
+    const isFaqSession = existingFlow === "FAQ";
 
     if (mainChoice) {
       if (isFaqSession) {
         // No hacemos switch; el FAQ handler puede interpretar 1-4 internamente
-        // y además apagamos menu_mode para evitar confusión.
         await updateSession(
           {
             sessionId: existing.session_id,
             step: existing.step,
-            data: { ...(existing.data || {}), menu_mode: false }
+            data: { ...(existing.data || {}), menu_mode: false, pending_flow: null }
           },
           client
         );
         // NO return; dejamos que el FAQ flow lo procese abajo
       } else if (menuMode) {
-        // switch permitido (solo si el usuario pidió menú antes)
+        // switch permitido (solo si el usuario pidió menú antes o cayó en guard)
         await closeSession(existing.session_id, client, "switch_flow");
         const newSession = await createSession(
           { phoneE164: inbound.phoneE164, flow: mainChoice, step: 1, data: { menu_mode: false } },
@@ -475,8 +573,7 @@ async function handleInbound({ inbound, send }) {
         });
         return;
       } else {
-        // No menu_mode => NO cambiamos flow (evita bugs tipo "1" en medio de un proceso)
-        // Caerá al handler del flow actual.
+        // No menu_mode => NO cambiamos flow
       }
     }
 
@@ -486,7 +583,7 @@ async function handleInbound({ inbound, send }) {
         {
           sessionId: existing.session_id,
           step: existing.step,
-          data: { ...(existing.data || {}), menu_mode: false }
+          data: { ...(existing.data || {}), menu_mode: false, pending_flow: null }
         },
         client
       );
@@ -496,6 +593,8 @@ async function handleInbound({ inbound, send }) {
     // lock + flow handle
     // =====================
     const locked = await lockSession(existing.session_id, client);
+    if (locked) locked.data = safeData(locked.data);
+
     if (!locked) {
       await client.query("COMMIT");
       await sendAndLog({
