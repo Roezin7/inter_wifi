@@ -72,7 +72,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     // Arrancamos checklist interactivo (pregunta 1)
     await send(
-      askYesNo("1/3) ¿El módem/router está *conectado a la luz* y tiene *luces encendidas*?")
+      askYesNo("(1/3) ¿El módem/router está *conectado a la luz* y tiene *luces encendidas*?")
     );
     return;
   }
@@ -95,7 +95,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    await send(askYesNo("2/3) ¿Ya lo *reiniciaste*? (desconéctalo 30 segundos y vuelve a conectar)"));
+    await send(askYesNo("(2/3) ¿Ya lo *reiniciaste*? (desconéctalo 30 segundos y vuelve a conectar)"));
     return;
   }
 
@@ -112,7 +112,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       // asumimos que ya está listo
       await updateSession({ step: 4, data: { ...data, q1_luces: true } });
       await send(
-        askYesNo("2/3) ¿Ya lo *reiniciaste*? (desconéctalo 30 segundos y vuelve a conectar)")
+        askYesNo("(2/3) ¿Ya lo *reiniciaste*? (desconéctalo 30 segundos y vuelve a conectar)")
       );
       return;
     }
@@ -135,7 +135,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    await send(askYesNo("3/3) Después de reiniciarlo, ¿*ya regresó el internet*?"));
+    await send(askYesNo("(3/3) Después de reiniciarlo, ¿*ya regresó el internet*?"));
     return;
   }
 
