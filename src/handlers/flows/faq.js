@@ -7,16 +7,26 @@ const {
   canonicalIntent,
 } = require("../../services/faqService");
 
-function intro() {
+// ===== UI =====
+function faqMenu() {
   return (
     "¡Claro! 😊 ¿Qué información necesitas?\n\n" +
     "1) Horarios\n" +
     "2) Ubicación\n" +
     "3) Formas de pago\n" +
     "4) Precios / paquetes\n\n" +
-    "Responde con *1, 2, 3, 4* o escríbelo (ej: “horarios”).\n\n" +
-    "Para volver al menú principal escribe *menú* o *inicio*."
+    "Responde con *1, 2, 3, 4* o escríbelo (ej: “horarios”).\n" +
+    "Para volver al menú principal escribe *inicio*."
   );
+}
+
+function footerShort() {
+  return "\n\n¿Algo más? Escribe *1-4* o *inicio*.";
+}
+
+function intro() {
+  // compat con inbound.getIntro()
+  return faqMenu();
 }
 
 function parseFaqChoice(text) {
@@ -26,6 +36,11 @@ function parseFaqChoice(text) {
   if (t === "3") return "pagos";
   if (t === "4") return "precios";
   return null;
+}
+
+function isFaqMenuWord(text) {
+  // “menu” NO aquí (menu = principal). Esto es SOLO para mostrar opciones FAQ.
+  return /^(info|informacion|información|opciones|ayuda|help)$/i.test(norm(text));
 }
 
 function fixNewlines(s) {
@@ -58,81 +73,86 @@ async function getSummary(groupKey) {
 
 function paymentsDetailHint() {
   return (
-    "\n\n¿Quieres más detalle? Puedes escribir:\n" +
-    "• *fechas de pago*\n" +
-    "• *transferencia / depósito*\n" +
-    "• *pago en oficina*\n" +
-    "• *enviar comprobante*\n\n" +
-    "Para volver al menú principal escribe *menú* o *inicio*."
+    "\n\nPuedes escribir: *fechas de pago*, *transferencia*, *depósito*, *enviar comprobante*."
   );
 }
 
 function pricesDetailHint() {
-  return (
-    "\n\nSi quieres seguir:\n" +
-    "• Escribe *cobertura* (y te pido colonia + calle)\n" +
-    "• O escribe *contratar internet* para iniciar solicitud\n\n" +
-    "Para volver al menú principal escribe *menú* o *inicio*."
-  );
+  return "\n\nPuedes escribir: *cobertura* o *contratar internet*.";
 }
 
-async function replyAndKeepMenu(send, message) {
-  // Responde + vuelve a mostrar el menú FAQ para mantener al usuario “en info”
-  await send(`${message}\n\n— — —\n\n${intro()}`);
-}
-
-async function handle({ session, inbound, send /* NO closeSession */ }) {
+/**
+ * ✅ Regla: FAQ NO CIERRA sesión
+ * ✅ Regla: NO re-mandar menú completo; solo al entrar o si piden "opciones/info/ayuda"
+ * ✅ Mantenerse en FAQ hasta que el usuario escriba "inicio" (lo maneja inbound)
+ */
+async function handle({ session, inbound, send, updateSession }) {
+  const step = Number(session.step || 1);
+  const data = session.data || {};
   const text = String(inbound.text || "").trim();
 
-  // Si llega vacío, solo muestra menú FAQ (sin cerrar)
-  if (!text) {
-    await send(intro());
+  // Si el usuario manda vacío o pide opciones explícitas -> mostrar menú FAQ
+  if (!text || isFaqMenuWord(text)) {
+    // asegúrate de marcar que ya está "dentro" del FAQ
+    if (step !== 1 || !data.faq_entered) {
+      await updateSession({ step: 1, data: { ...data, faq_entered: true } });
+    }
+    await send(faqMenu());
     return;
   }
 
   const choice = parseFaqChoice(text);
 
+  // ===== DETERMINÍSTICO POR MENÚ FAQ =====
   if (choice === "horarios") {
     const f = await getFaqById(4);
-    if (f?.answer) await replyAndKeepMenu(send, wrapPro(f.answer, f.category));
-    else await replyAndKeepMenu(send, "📌 *Información*\n\nPor ahora no tengo el horario cargado. Escribe *agente*.");
+    const msg = f?.answer
+      ? wrapPro(f.answer, f.category)
+      : "📌 *Información*\n\nPor ahora no tengo el horario cargado. Escribe *agente*.";
+    await updateSession({ step: 2, data: { ...data, faq_entered: true, last: "horarios" } });
+    await send(msg + footerShort());
     return;
   }
 
   if (choice === "ubicacion") {
     const f = await getFaqById(1);
-    if (f?.answer) await replyAndKeepMenu(send, wrapPro(f.answer, f.category));
-    else await replyAndKeepMenu(send, "📌 *Información*\n\nPor ahora no tengo la ubicación cargada. Escribe *agente*.");
+    const msg = f?.answer
+      ? wrapPro(f.answer, f.category)
+      : "📌 *Información*\n\nPor ahora no tengo la ubicación cargada. Escribe *agente*.";
+    await updateSession({ step: 2, data: { ...data, faq_entered: true, last: "ubicacion" } });
+    await send(msg + footerShort());
     return;
   }
 
   if (choice === "pagos") {
     const summary = await getSummary("pagos");
-    if (!summary) {
-      await replyAndKeepMenu(send, "💳 *Pagos*\n\nPor ahora no tengo la información de pagos cargada. Escribe *agente*.");
-      return;
-    }
-    await replyAndKeepMenu(send, summary + paymentsDetailHint());
+    const msg = summary
+      ? summary + paymentsDetailHint()
+      : "💳 *Pagos*\n\nPor ahora no tengo la información de pagos cargada. Escribe *agente*.";
+    await updateSession({ step: 2, data: { ...data, faq_entered: true, last: "pagos" } });
+    await send(msg + footerShort());
     return;
   }
 
   if (choice === "precios") {
     const summary = await getSummary("precios");
-    if (!summary) {
-      await replyAndKeepMenu(send, "💰 *Precios y paquetes*\n\nPor ahora no tengo paquetes cargados. Escribe *agente*.");
-      return;
-    }
-    await replyAndKeepMenu(send, summary + pricesDetailHint());
+    const msg = summary
+      ? summary + pricesDetailHint()
+      : "💰 *Precios y paquetes*\n\nPor ahora no tengo paquetes cargados. Escribe *agente*.";
+    await updateSession({ step: 2, data: { ...data, faq_entered: true, last: "precios" } });
+    await send(msg + footerShort());
     return;
   }
 
-  // Texto libre
+  // ===== TEXTO LIBRE (match) =====
   const canon = canonicalIntent(text);
 
+  // Canon pag/precios -> resumen
   if (canon === "pagos") {
     const summary = await getSummary("pagos");
     if (summary) {
-      await replyAndKeepMenu(send, summary + paymentsDetailHint());
+      await updateSession({ step: 2, data: { ...data, faq_entered: true, last: "pagos" } });
+      await send(summary + paymentsDetailHint() + footerShort());
       return;
     }
   }
@@ -140,29 +160,25 @@ async function handle({ session, inbound, send /* NO closeSession */ }) {
   if (canon === "precios") {
     const summary = await getSummary("precios");
     if (summary) {
-      await replyAndKeepMenu(send, summary + pricesDetailHint());
+      await updateSession({ step: 2, data: { ...data, faq_entered: true, last: "precios" } });
+      await send(summary + pricesDetailHint() + footerShort());
       return;
     }
   }
 
+  // match normal
   const threshold = Number(process.env.FAQ_MATCH_THRESHOLD || 0.62);
   const m = await matchFaq(text, threshold);
 
   if (m?.matched && m?.faq?.answer) {
-    await replyAndKeepMenu(send, wrapPro(m.faq.answer, m.faq.category));
+    await updateSession({ step: 2, data: { ...data, faq_entered: true, last: m.faq?.id || null } });
+    await send(wrapPro(m.faq.answer, m.faq.category) + footerShort());
     return;
   }
 
-  // no match => vuelve a mostrar menú FAQ (sin cerrar)
-  await send(
-    "Para ayudarte mejor, elige una opción:\n\n" +
-      "1) Horarios\n" +
-      "2) Ubicación\n" +
-      "3) Formas de pago\n" +
-      "4) Precios / paquetes\n\n" +
-      "O escribe tu duda (ej: “transferencia”, “ubicación”).\n\n" +
-      "Para volver al menú principal escribe *menú* o *inicio*."
-  );
+  // no match: NO mandes menú completo; solo micro guía
+  await updateSession({ step: 2, data: { ...data, faq_entered: true, last: "no_match" } });
+  await send("No te entendí del todo 😅 Escribe *1-4* para opciones o *inicio* para volver al menú principal.");
 }
 
 module.exports = { intro, handle };
