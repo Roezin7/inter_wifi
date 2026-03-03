@@ -10,7 +10,7 @@ const {
   extractText,
 } = require("../utils/waPayload");
 
-const { sendText } = require("../services/wasenderService");
+const { sendText, sendImage } = require("../services/wasenderService"); // ✅ add sendImage
 const { handleInbound, menu } = require("../handlers/inbound");
 const { logger } = require("../utils/logger");
 
@@ -209,6 +209,52 @@ function safePayloadPreview(payload) {
   }
 }
 
+/**
+ * ✅ Unified sender:
+ * - send("hola") -> texto
+ * - send({ type:"image", url, caption }) -> imagen
+ * - send({ type:"document", url, filename, caption }) -> documento (opcional)
+ */
+async function sendOutbound({ toE164, out }) {
+  // texto plano
+  if (typeof out === "string") {
+    const text = String(out || "");
+    if (!text) return;
+    return sendText({ toE164, text });
+  }
+
+  // objeto payload
+  if (out && typeof out === "object") {
+    const type = String(out.type || "").toLowerCase();
+
+    if (type === "image") {
+      const url = out.url || out.imageUrl || out.link;
+      const caption = String(out.caption || "");
+      if (!url) throw new Error("sendOutbound(image) missing url");
+      return sendImage({ toE164, url: String(url), caption });
+    }
+
+    // (Opcional) si luego quieres PDF/archivo
+    if (type === "document") {
+      // Si tu wasenderService ya tiene sendDocument, aquí lo conectas.
+      // throw new Error("sendOutbound(document) not implemented");
+      const url = out.url || out.documentUrl || out.link;
+      const caption = String(out.caption || "");
+      const filename = out.filename || out.fileName || "documento";
+      if (!url) throw new Error("sendOutbound(document) missing url");
+      if (typeof sendDocument !== "function") {
+        throw new Error("sendDocument not available in wasenderService");
+      }
+      return sendDocument({ toE164, url: String(url), filename: String(filename), caption });
+    }
+
+    throw new Error(`sendOutbound unsupported type=${type || "(empty)"}`);
+  }
+
+  // nada
+  return;
+}
+
 router.post("/webhook", async (req, res) => {
   // ✅ SIEMPRE responder 200 rápido
   res.status(200).json({ ok: true });
@@ -247,8 +293,9 @@ router.post("/webhook", async (req, res) => {
 
     const inboundText = String(safeExtractText(payload) || "").trim();
 
-    const send = async (textOut) => {
-      await sendText({ toE164: phoneE164, text: String(textOut || "") });
+    // ✅ sender que soporta texto e imagen
+    const send = async (out) => {
+      await sendOutbound({ toE164: phoneE164, out });
     };
 
     // ✅ si llega vacío total, solo manda menú (SIN abrir sesión)
@@ -267,7 +314,7 @@ router.post("/webhook", async (req, res) => {
         providerSession,
         providerMsgId,
       },
-      send,
+      send, // ✅ ahora soporta {type:"image", url, caption}
     });
   } catch (err) {
     logger?.error?.("Webhook error", err);

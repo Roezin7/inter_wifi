@@ -621,21 +621,41 @@ async function handleInbound({ inbound, send }) {
     }
 
     const ctx = {
-      session: locked,
-      inbound,
-      send: async (textOut) => {
-        await sendAndLog({
-          sessionId: locked.session_id,
-          flow: locked.flow,
-          step: locked.step,
-          kind: "flow_reply",
-          text: textOut,
-        });
-      },
-      updateSession: async ({ step, data }) =>
-        updateSession({ sessionId: locked.session_id, step, data }, client),
-      closeSession: async () => closeSession(locked.session_id, client, "flow_done"),
-    };
+  session: locked,
+  inbound,
+
+  send: async (textOut) => {
+    await sendAndLog({
+      sessionId: locked.session_id,
+      flow: locked.flow,
+      step: locked.step,
+      kind: "flow_reply_text",
+      text: textOut
+    });
+  },
+
+  // ✅ NUEVO: enviar imagen (requiere que /routes/wasender.js soporte sendImage)
+  sendImage: async (imageUrl, caption = "") => {
+    await sendAndLog({
+      sessionId: locked.session_id,
+      flow: locked.flow,
+      step: locked.step,
+      kind: "flow_reply_image",
+      text: caption || ""
+    });
+
+    // IMPORTANTe:
+    // aquí necesitas que el "send" que recibes en handleInbound
+    // pueda mandar media. Si hoy NO puede, ver nota B.
+    await send({ type: "image", url: imageUrl, caption });
+  },
+
+  updateSession: async ({ step, data }) =>
+    updateSession({ sessionId: locked.session_id, step, data }, client),
+
+  closeSession: async () =>
+    closeSession(locked.session_id, client, "flow_done"),
+};
 
     logEvent({
       event: "flow_dispatch",
