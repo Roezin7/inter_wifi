@@ -46,7 +46,6 @@ function extFromMime(mime) {
   if (m.includes("png")) return "png";
   if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
   if (m.includes("webp")) return "webp";
-  if (m.includes("heic")) return "heic";
   return "bin";
 }
 
@@ -54,67 +53,131 @@ function sha1(s) {
   return crypto.createHash("sha1").update(String(s || "")).digest("hex").slice(0, 12);
 }
 
-function isEncUrl(url) {
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function looksEnc(url) {
   return /\.enc(\?|$)/i.test(String(url || ""));
 }
 
-function b64ToBuf(b64) {
-  try {
-    return Buffer.from(String(b64 || ""), "base64");
-  } catch {
-    return null;
-  }
-}
-
-function hkdfSha256(ikm, length, info) {
-  // HKDF-Extract(salt="", IKM) -> PRK
-  const prk = crypto.createHmac("sha256", Buffer.alloc(0)).update(ikm).digest();
-
-  // HKDF-Expand(PRK, info, L)
-  const infoBuf = Buffer.from(String(info || ""), "utf8");
-  let t = Buffer.alloc(0);
-  let okm = Buffer.alloc(0);
-  let i = 0;
-
-  while (okm.length < length) {
-    i += 1;
-    t = crypto
-      .createHmac("sha256", prk)
-      .update(Buffer.concat([t, infoBuf, Buffer.from([i])]))
-      .digest();
-    okm = Buffer.concat([okm, t]);
-  }
-
-  return okm.slice(0, length);
-}
-
-function waInfoLabel(kind, mimetype) {
-  // WhatsApp usa labels distintas según el tipo
-  // Para imágenes en general:
-  // "WhatsApp Image Keys"
-  // Video:
-  // "WhatsApp Video Keys"
-  // Audio:
-  // "WhatsApp Audio Keys"
-  // Documento:
-  // "WhatsApp Document Keys"
+// =======================
+// WhatsApp media decrypt
+// =======================
+function inferWaMediaType({ kind, mime }) {
   const k = String(kind || "").toLowerCase();
-  const m = String(mimetype || "").toLowerCase();
+  if (k === "image") return "image";
+  if (k === "video") return "video";
+  if (k === "audio") return "audio";
+  if (k === "document") return "document";
+  if (k === "sticker") return "image";
 
-  if (k === "image" || m.startsWith("image/")) return "WhatsApp Image Keys";
-  if (k === "video" || m.startsWith("video/")) return "WhatsApp Video Keys";
-  if (k === "audio" || m.startsWith("audio/")) return "WhatsApp Audio Keys";
-  return "WhatsApp Document Keys";
+  const m = String(mime || "").toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  if (m.startsWith("audio/")) return "audio";
+  return "document";
 }
 
-async function downloadBinary(url) {
-  const res = await fetchFn(url, { method: "GET" });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`download failed: ${res.status} ${text.slice(0, 200)}`);
+function waInfoString(mediaType) {
+  switch (mediaType) {
+    case "image":
+      return "WhatsApp Image Keys";
+    case "video":
+      return "WhatsApp Video Keys";
+    case "audio":
+      return "WhatsApp Audio Keys";
+    default:
+      return "WhatsApp Document Keys";
   }
-  const buf = Buffer.from(await res.arrayBuffer());
-  return { buf, contentType: res.headers.get("content-type") || null };
+}
+
+/**
+ * Deriva iv/cipherKey/macKey a partir de mediaKey (base64)
+ * HKDF-SHA256 con salt=0x00.. y info "WhatsApp <Type> Keys"
+ */
+function deriveWaKeys(mediaKeyB64, mediaType) {
+  const mediaKey = Buffer.from(String(mediaKeyB64 || ""), "base64");
+  if (!mediaKey.length) throw new Error("deriveWaKeys: missing mediaKey");
+
+  const info = Buffer.from(waInfoString(mediaType), "utf-8");
+  const salt = Buffer.alloc(32, 0);
+
+  // WhatsApp requiere 112 bytes de output
+  const expanded = crypto.hkdfSync("sha256", mediaKey, salt, info, 112);
+
+  const iv = expanded.subarray(0, 16);
+  const cipherKey = expanded.subarray(16, 48); // 32 bytes
+  const macKey = expanded.subarray(48, 80); // 32 bytes
+  // const refKey = expanded.subarray(80, 112); // no necesario
+
+  return { iv, cipherKey, macKey };
+}
+
+/**
+ * Descarga binario (sin auth) desde la URL mmg.whatsapp.net
+ * con reintentos ligeros.
+ */
+async function downloadBinary(url, { retries = 2 } = {}) {
+  const u = String(url || "");
+  if (!u) throw new Error("downloadBinary: missing url");
+
+  let lastErr = null;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const res = await fetchFn(u, {
+        method: "GET",
+        // algunos edges se ponen mamones sin UA
+        headers: { "User-Agent": "Mozilla/5.0" },
+      });
+
+      if (!res.ok) {
+        const txt = await res.text().catch(() => "");
+        throw new Error(`downloadBinary failed: ${res.status} ${txt.slice(0, 200)}`);
+      }
+
+      const contentType = res.headers.get("content-type") || "application/octet-stream";
+      const buf = Buffer.from(await res.arrayBuffer());
+      return { buf, contentType };
+    } catch (e) {
+      lastErr = e;
+      if (i < retries) await sleep(250 * (i + 1));
+    }
+  }
+  throw lastErr || new Error("downloadBinary failed");
+}
+
+/**
+ * WhatsApp .enc format:
+ * - body: ciphertext
+ * - tail: 10 bytes MAC (truncated HMAC-SHA256)
+ *
+ * MAC = first10(HMAC(macKey, iv + ciphertext))
+ * PLAINTEXT = AES-256-CBC(cipherKey, iv) decrypt(ciphertext)
+ */
+function decryptWhatsAppEnc({ encBuf, mediaKeyB64, mime, kind }) {
+  if (!Buffer.isBuffer(encBuf) || !encBuf.length) throw new Error("decrypt: empty encBuf");
+
+  const mediaType = inferWaMediaType({ kind, mime });
+  const { iv, cipherKey, macKey } = deriveWaKeys(mediaKeyB64, mediaType);
+
+  // últimos 10 bytes son MAC
+  if (encBuf.length <= 10) throw new Error("decrypt: encBuf too small");
+  const fileMac = encBuf.subarray(encBuf.length - 10);
+  const ciphertext = encBuf.subarray(0, encBuf.length - 10);
+
+  // validar MAC (best-effort; si falla, no vale la pena seguir)
+  const hmac = crypto.createHmac("sha256", macKey).update(Buffer.concat([iv, ciphertext])).digest();
+  const mac10 = hmac.subarray(0, 10);
+
+  // timing safe compare
+  if (fileMac.length !== mac10.length || !crypto.timingSafeEqual(fileMac, mac10)) {
+    throw new Error("decrypt: mac_mismatch");
+  }
+
+  const decipher = crypto.createDecipheriv("aes-256-cbc", cipherKey, iv);
+  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+  return plaintext;
 }
 
 async function uploadToR2({ key, buf, contentType }) {
@@ -135,170 +198,72 @@ async function uploadToR2({ key, buf, contentType }) {
 }
 
 /**
- * Decrypt WhatsApp .enc media
- * Algoritmo:
- * - mediaKey (base64) -> bytes
- * - HKDF-SHA256(mediaKey, 112, infoLabel)
- * - iv = okm[0..15], cipherKey = okm[16..47], macKey = okm[48..79]
- * - file = ciphertext || mac (10 bytes)
- * - mac = HMAC-SHA256(macKey, iv || ciphertext) trunc(10)
- * - plaintext = AES-256-CBC(cipherKey, iv).decrypt(ciphertext)
- */
-function decryptWhatsAppEnc({ encBuf, mediaKeyB64, infoLabel }) {
-  const mediaKey = b64ToBuf(mediaKeyB64);
-  if (!mediaKey || mediaKey.length < 16) {
-    return { ok: false, reason: "bad_mediaKey" };
-  }
-
-  if (!encBuf || encBuf.length < 32) {
-    return { ok: false, reason: "enc_too_small" };
-  }
-
-  // Derivar OKM
-  const okm = hkdfSha256(mediaKey, 112, infoLabel);
-  const iv = okm.slice(0, 16);
-  const cipherKey = okm.slice(16, 48); // 32
-  const macKey = okm.slice(48, 80); // 32
-
-  // WhatsApp: último 10 bytes = mac
-  const macSize = 10;
-  if (encBuf.length <= macSize + 16) {
-    return { ok: false, reason: "enc_invalid_len" };
-  }
-
-  const ciphertext = encBuf.slice(0, encBuf.length - macSize);
-  const mac = encBuf.slice(encBuf.length - macSize);
-
-  // Verificación MAC (si falla, igual intentamos decrypt pero marcamos)
-  let macOk = false;
-  try {
-    const calc = crypto.createHmac("sha256", macKey).update(Buffer.concat([iv, ciphertext])).digest();
-    const calcTrunc = calc.slice(0, macSize);
-    macOk = crypto.timingSafeEqual(calcTrunc, mac);
-  } catch {
-    macOk = false;
-  }
-
-  // Decrypt AES-256-CBC
-  try {
-    const decipher = crypto.createDecipheriv("aes-256-cbc", cipherKey, iv);
-    decipher.setAutoPadding(true);
-    const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-
-    if (!plain || !plain.length) return { ok: false, reason: "decrypt_empty", macOk };
-
-    return { ok: true, buf: plain, macOk };
-  } catch (e) {
-    return { ok: false, reason: "decrypt_failed", macOk, err: e?.message || String(e) };
-  }
-}
-
-/**
- * resolveAndStoreMedia (PRO)
- * - Si URL no es .enc: regresa tal cual
- * - Si es .enc: descarga -> decrypt WhatsApp con mediaKey -> sube a R2 -> regresa URL pública
- *
- * Params:
- * - providerUrl: url de mmg.whatsapp.net ... .enc
- * - mediaKey: base64
- * - mime: mimetype (image/jpeg)
- * - phoneE164: para key
- * - kind: image/video/audio/document (para label hkdf + folder)
- * - folder: (opcional) override folder
- * - filenamePrefix: (opcional)
+ * Resuelve la url pública del media:
+ * - Si ya NO es .enc => se regresa tal cual.
+ * - Si es .enc => descarga, desencripta con mediaKey, sube a R2 y regresa URL pública.
  */
 async function resolveAndStoreMedia({
   providerUrl,
   mediaKey,
   mime,
   phoneE164,
-  kind = "document",
-  folder,
-  filenamePrefix,
+  kind,
+  folder = "uploads",
+  filenamePrefix = "media",
 }) {
   const url = String(providerUrl || "").trim();
-  if (!url) return { publicUrl: null, contentType: mime || null, source: "no_url", reason: "no_url" };
+  const isEnc = looksEnc(url);
 
-  // No .enc => úsala tal cual
-  if (!isEncUrl(url)) {
+  if (url && !isEnc) {
     return { publicUrl: url, contentType: mime || null, source: "as_is" };
   }
 
+  if (!url) {
+    return { publicUrl: null, contentType: mime || null, source: "no_url" };
+  }
+
   if (!mediaKey) {
-    return {
-      publicUrl: null,
-      contentType: mime || null,
-      source: "no_mediaKey",
-      reason: "no_mediaKey",
-    };
+    // sin mediaKey NO puedes desencriptar WhatsApp
+    return { publicUrl: null, contentType: mime || null, source: "no_media_key" };
   }
 
-  // 1) descarga .enc
-  let enc;
+  let dl;
   try {
-    enc = await downloadBinary(url);
+    dl = await downloadBinary(url, { retries: 2 });
   } catch (e) {
-    return {
-      publicUrl: null,
-      contentType: mime || null,
-      source: "download_failed",
-      reason: "download_failed",
-      err: e?.message || String(e),
-    };
+    return { publicUrl: null, contentType: mime || null, source: "download_failed", reason: e?.message };
   }
 
-  // 2) decrypt
-  const infoLabel = waInfoLabel(kind, mime);
-  const dec = decryptWhatsAppEnc({
-    encBuf: enc.buf,
-    mediaKeyB64: mediaKey,
-    infoLabel,
-  });
+  const contentType = mime || dl.contentType || "application/octet-stream";
 
-  if (!dec.ok) {
-    return {
-      publicUrl: null,
-      contentType: mime || null,
-      source: "decrypt_failed",
-      reason: dec.reason || "decrypt_failed",
-      macOk: dec.macOk,
-      err: dec.err,
-    };
-  }
-
-  // 3) subir a R2
-  const contentType = mime || enc.contentType || "application/octet-stream";
-  const ext = extFromMime(contentType);
-
-  const date = new Date().toISOString().slice(0, 10);
-  const key = [
-    String(folder || `uploads/${kind || "media"}`),
-    date,
-    `${String(filenamePrefix || "file")}_${sha1(phoneE164)}_${sha1(url)}.${ext}`,
-  ]
-    .join("/")
-    .replace(/\/+/g, "/");
-
-  let publicUrl;
+  let plain;
   try {
-    publicUrl = await uploadToR2({ key, buf: dec.buf, contentType });
+    plain = decryptWhatsAppEnc({
+      encBuf: dl.buf,
+      mediaKeyB64: mediaKey,
+      mime: contentType,
+      kind,
+    });
   } catch (e) {
     return {
       publicUrl: null,
       contentType,
-      source: "r2_upload_failed",
-      reason: "r2_upload_failed",
-      macOk: dec.macOk,
-      err: e?.message || String(e),
+      source: "decrypt_failed",
+      reason: e?.message || "decrypt_failed",
     };
   }
 
-  return {
-    publicUrl: publicUrl || null,
-    contentType,
-    source: publicUrl ? "r2" : "no_r2",
-    macOk: dec.macOk,
-  };
+  const ext = extFromMime(contentType);
+  const key = [
+    String(folder || "uploads").replace(/^\/+|\/+$/g, ""),
+    kind || "media",
+    new Date().toISOString().slice(0, 10),
+    `${sha1(phoneE164)}_${sha1(url)}_${sha1(mediaKey)}_${filenamePrefix}.${ext}`,
+  ].join("/");
+
+  const publicUrl = await uploadToR2({ key, buf: plain, contentType });
+
+  return { publicUrl: publicUrl || null, contentType, source: publicUrl ? "r2" : "no_r2" };
 }
 
 module.exports = { resolveAndStoreMedia };

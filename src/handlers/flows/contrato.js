@@ -11,7 +11,7 @@ const { notifyAdmin, buildNewContractAdminMsg } = require("../../services/notify
 const { parsePhoneE164 } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
 
-// ✅ PRO: .enc -> decrypt WhatsApp -> subir a R2 -> URL pública
+// ✅ Nuevo: resolver .enc -> jpg en R2 (WhatsApp decrypt)
 const { resolveAndStoreMedia } = require("../../services/mediaService");
 
 // ✅ Para evitar que replies/templates te cambien textos sin querer
@@ -28,7 +28,10 @@ if (USE_TEMPLATES) {
 // =====================
 function intro() {
   if (templates && pick) return pick(templates.contrato_intro, "seed")();
-  return "Perfecto 🙌 Para revisar cobertura, dime tu *colonia*.\nEjemplo: “Centro”.";
+  return (
+    "Perfecto 🙌 Para revisar cobertura, dime tu *colonia*.\n" +
+    "Ejemplo: “Centro”."
+  );
 }
 
 function askColonia() {
@@ -51,6 +54,11 @@ function looksLikeNo(t) {
 // =====================
 // Media helpers
 // =====================
+/**
+ * inbound.media.items[0] viene desde tu normalizador:
+ * { url, mimetype, mediaKey, fileName, id, ... }
+ * En logs vimos que rawMedia trae url + mimetype + mediaKey perfecto.
+ */
 function pickMedia(inboundMedia) {
   const urls = inboundMedia?.urls || [];
   const items = inboundMedia?.items || [];
@@ -62,9 +70,6 @@ function pickMedia(inboundMedia) {
     mimetype: first?.mimetype || inboundMedia?.mimetype || null,
     mediaKey: first?.mediaKey || null,
     fileName: first?.fileName || null,
-    fileLength: first?.fileLength || null,
-    width: first?.width || null,
-    height: first?.height || null,
   };
 }
 
@@ -87,13 +92,14 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     const coloniaRaw = txt;
-    const res = await resolveColonia(coloniaRaw, { limit: 5 });
 
+    const res = await resolveColonia(coloniaRaw, { limit: 5 });
     if (!res?.ok) {
       await send(askColonia());
       return;
     }
 
+    // auto accept
     if (res.autoAccept) {
       const nextData = {
         ...data,
@@ -101,11 +107,16 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         colonia: res.best.colonia,
         colonia_confirmed: true,
       };
+
       await updateSession({ step: 11, data: nextData });
-      await send(`Perfecto ✅ Colonia *${nextData.colonia}*.\nAhora dime tu *calle y número* (Ej: Hidalgo 311).`);
+      await send(
+        `Perfecto ✅ Colonia *${nextData.colonia}*.\n` +
+          "Ahora dime tu *calle y número* (Ej: Hidalgo 311)."
+      );
       return;
     }
 
+    // duda: confirm
     const nextData = {
       ...data,
       colonia_input: coloniaRaw,
@@ -125,8 +136,12 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     if (looksLikeYes(txt)) {
       const colonia = data.colonia_guess;
       const nextData = { ...data, colonia, colonia_confirmed: true };
+
       await updateSession({ step: 11, data: nextData });
-      await send(`Listo ✅ Colonia *${colonia}*.\nAhora dime tu *calle y número* (Ej: Hidalgo 311).`);
+      await send(
+        `Listo ✅ Colonia *${colonia}*.\n` +
+          "Ahora dime tu *calle y número* (Ej: Hidalgo 311)."
+      );
       return;
     }
 
@@ -147,12 +162,14 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   // STEP 11: SOLO CALLE + NÚMERO
   // =====================
   if (step === 11) {
+    // aquí SI nos ponemos estrictos (evita “Centro Hidalgo 311” mezclado)
     if (!/\d/.test(txt) || txt.length < 4) {
       await send("¿Me lo mandas como *calle y número*? Ej: “Hidalgo 311” 🙂");
       return;
     }
 
-    await updateSession({ step: 2, data: { ...data, calle_numero: txt } });
+    const nextData = { ...data, calle_numero: txt };
+    await updateSession({ step: 2, data: nextData });
     await send("Excelente ✅ ¿Cuál es tu *nombre completo*?");
     return;
   }
@@ -191,18 +208,14 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     await updateSession({ step: 4, data: { ...data, telefono_contacto: tel } });
-
-    // 👇 Copy premium: instrucción clara SIN sonar “reenvía”
     await send(
-      "Listo ✅ Ahora envíame la foto de tu *INE (frente)* 📸\n" +
-        "• Con buena luz\n" +
-        "• Sin reflejos\n" +
-        "• Que se lean datos y número"
+      "Listo ✅ Ahora envíame foto de tu *INE (frente)* 📸\n" +
+        "Tip: buena luz, sin reflejos y que se lea el texto."
     );
     return;
   }
 
-  // STEP 4: INE frente (decrypt .enc -> R2)
+  // STEP 4: INE frente -> resolver .enc y subir a R2
   if (step === 4) {
     if (!hasMediaUrls(inbound.media)) {
       await send("Necesito la *foto del frente* de la INE 📸 (envíala como imagen, porfa)");
@@ -211,17 +224,23 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     const m = pickMedia(inbound.media);
 
-    // Guardrail: si faltan campos, no rompas UX
     if (!m.url || !m.mimetype || !m.mediaKey) {
+      // Aquí NO le pedimos “reenvía” como default.
       await notifyAdmin(
-        `⚠️ CONTRATO INE FRENTE - MEDIA INCOMPLETA\n` +
+        `⚠️ INE FRENTE - MEDIA INCOMPLETA\n` +
           `Tel: ${phoneE164}\n` +
-          `url: ${m.url || "N/A"}\n` +
+          `Faltan campos (url/mimetype/mediaKey)\n` +
+          `rawUrl: ${m.url || "N/A"}\n` +
           `mime: ${m.mimetype || "N/A"}\n` +
           `hasMediaKey: ${m.mediaKey ? "YES" : "NO"}`
       );
 
-      await send("Recibido ✅ Estoy validando tu INE. Si hace falta algo, te aviso por aquí.");
+      await send(
+        "Recibí tu INE, pero el archivo llegó en un formato que no puedo procesar automáticamente 😅\n" +
+          "Un asesor la revisará y te confirmará en breve."
+      );
+      // Puedes decidir si cerrar o mantener en step 4 esperando otra imagen:
+      // Yo prefiero mantener step 4 para que si manda otra, se procese sin fricción.
       return;
     }
 
@@ -237,15 +256,17 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     if (!resolved?.publicUrl) {
       await notifyAdmin(
-        `⚠️ CONTRATO INE FRENTE - DECRYPT/STORE FAIL\n` +
+        `⚠️ INE FRENTE - DECRYPT/STORE FAIL\n` +
           `Tel: ${phoneE164}\n` +
-          `reason: ${resolved?.reason || "unknown"}\n` +
-          `source: ${resolved?.source || "unknown"}\n` +
-          `macOk: ${String(resolved?.macOk ?? "n/a")}\n` +
-          `err: ${resolved?.err || "N/A"}`
+          `Reason: ${resolved?.reason || "unknown"}\n` +
+          `Source: ${resolved?.source || "unknown"}`
       );
 
-      await send("Recibido ✅ Estoy validando tu INE. Si necesito una confirmación adicional, te aviso por aquí.");
+      await send(
+        "Recibí tu INE ✅\n" +
+          "Estoy validando la imagen. Si necesito una confirmación adicional, te aviso por aquí."
+      );
+      // mantenemos step 4 para permitir recuperación sin que se vea “raro”
       return;
     }
 
@@ -261,14 +282,12 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     await send(
       "Gracias ✅ Ahora envíame la foto de tu *INE (atrás)* 📸\n" +
-        "• Que se lean los números\n" +
-        "• Sin reflejos\n" +
-        "• Completa dentro del encuadre"
+        "Tip: que se lean los números y el texto."
     );
     return;
   }
 
-  // STEP 5: INE reverso (decrypt .enc -> R2 -> createContract)
+  // STEP 5: INE atrás -> resolver .enc -> crear contrato
   if (step === 5) {
     if (!hasMediaUrls(inbound.media)) {
       await send("Necesito la *foto de atrás* de la INE 📸 (envíala como imagen, porfa)");
@@ -279,14 +298,17 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     if (!m.url || !m.mimetype || !m.mediaKey) {
       await notifyAdmin(
-        `⚠️ CONTRATO INE REVERSO - MEDIA INCOMPLETA\n` +
+        `⚠️ INE REVERSO - MEDIA INCOMPLETA\n` +
           `Tel: ${phoneE164}\n` +
-          `url: ${m.url || "N/A"}\n` +
+          `rawUrl: ${m.url || "N/A"}\n` +
           `mime: ${m.mimetype || "N/A"}\n` +
           `hasMediaKey: ${m.mediaKey ? "YES" : "NO"}`
       );
 
-      await send("Recibido ✅ Estoy validando tu INE (atrás). Si hace falta algo, te aviso por aquí.");
+      await send(
+        "Recibí tu INE (atrás) ✅\n" +
+          "Estoy validando la imagen. Si hace falta algo, te aviso por aquí."
+      );
       return;
     }
 
@@ -294,8 +316,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     const sameUrl =
       data.ine_frente_source_url && m.url && String(m.url) === String(data.ine_frente_source_url);
     if (sameUrl) {
-      // aquí sí conviene pedir otra, pero en tono premium:
-      await send("Creo que me llegó la misma foto del *frente*. Para completar el trámite necesito la INE *por atrás* 📸");
+      await send("Me llegó la misma imagen que la del *frente* 😅\n¿Me mandas la INE *por atrás*?");
       return;
     }
 
@@ -311,15 +332,16 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     if (!resolved?.publicUrl) {
       await notifyAdmin(
-        `⚠️ CONTRATO INE REVERSO - DECRYPT/STORE FAIL\n` +
+        `⚠️ INE REVERSO - DECRYPT/STORE FAIL\n` +
           `Tel: ${phoneE164}\n` +
-          `reason: ${resolved?.reason || "unknown"}\n` +
-          `source: ${resolved?.source || "unknown"}\n` +
-          `macOk: ${String(resolved?.macOk ?? "n/a")}\n` +
-          `err: ${resolved?.err || "N/A"}`
+          `Reason: ${resolved?.reason || "unknown"}\n` +
+          `Source: ${resolved?.source || "unknown"}`
       );
 
-      await send("Recibido ✅ Estoy validando tu INE (atrás). Si necesito confirmación adicional, te aviso por aquí.");
+      await send(
+        "Recibí tu INE (atrás) ✅\n" +
+          "Estoy validando la imagen. Si necesito confirmación adicional, te aviso por aquí."
+      );
       return;
     }
 
@@ -353,6 +375,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
+  // fallback
   await closeSession(session.session_id);
   await send("Listo ✅ Si necesitas algo más, aquí estoy.");
 }
