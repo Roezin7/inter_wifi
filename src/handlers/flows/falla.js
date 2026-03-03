@@ -24,6 +24,7 @@ function norm(s) {
 function isYes(t) {
   return /^(si|sí|s|ok|va|listo|correcto|afirmativo)$/i.test(norm(t));
 }
+
 function isNo(t) {
   return /^(no|n|nel|negativo)$/i.test(norm(t));
 }
@@ -53,11 +54,15 @@ function buildFolioMsg(folio) {
 
 async function handle({ session, inbound, send, sendImage, updateSession, closeSession }) {
   const step = Number(session.step || 1);
+
+  // OJO: siempre clona data para no mutar referencias inesperadas
   const data = session.data || {};
   const txtRaw = String(inbound.text || "").trim();
 
   const phoneE164 = session.phone_e164 || inbound.phoneE164 || null;
-  const DIAGRAM_URL = process.env.FALLA_DIAGRAM_URL || "";
+
+  // URL del diagrama (ponla en .env)
+  const DIAGRAM_URL = String(process.env.FALLA_DIAGRAM_URL || "").trim();
 
   // STEP 1: tipo A/B
   if (step === 1) {
@@ -67,24 +72,29 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
       return;
     }
 
-    const next = { ...data, tipo: ab === "A" ? "SIN_INTERNET" : "LENTO_INTERMITENTE" };
+    // armamos next y lo persistimos
+    let next = { ...data, tipo: ab === "A" ? "SIN_INTERNET" : "LENTO_INTERMITENTE" };
     await updateSession({ step: 2, data: next });
 
-    // ✅ manda diagrama una sola vez (si hay URL y sendImage)
+    // ✅ manda diagrama una sola vez
+    // IMPORTANT: guardamos flag y NO dependemos de session.data (puede venir stale)
     if (!next.diagram_sent && DIAGRAM_URL && typeof sendImage === "function") {
       try {
         await sendImage(
           DIAGRAM_URL,
           "📌 *Guía rápida de conexiones*\nRevisa el diagrama para confirmar que todo esté conectado."
         );
-        next.diagram_sent = true;
+        next = { ...next, diagram_sent: true };
         await updateSession({ step: 2, data: next });
       } catch {
         // si falla enviar imagen, no rompas el flujo
       }
     }
 
-    await send("¿Los focos del módem/router se ven *verdes* o *naranjas/rojos*? (Responde: verdes / naranjas)");
+    await send(
+      "¿Los focos del módem/router se ven *verdes* o *naranjas/rojos*?\n" +
+        "Responde: *verdes* / *naranjas*"
+    );
     return;
   }
 
@@ -101,7 +111,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
       await updateSession({ step: 3, data: { ...data, lights } });
       await send(
         "Eso normalmente indica un cable flojo o mal conectado.\n" +
-        "¿Ya desconectaste y reconectaste *cable por cable* hasta escuchar el “click”? (sí/no)"
+          "¿Ya desconectaste y reconectaste *cable por cable* hasta escuchar el “click”? (sí/no)"
       );
       return;
     }
@@ -110,9 +120,9 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
     await updateSession({ step: 4, data: { ...data, lights } });
     await send(
       "Perfecto.\n" +
-      "Ahora desconecta de la luz *módem y router* por *3 minutos* ⏱️\n" +
-      "Luego conéctalos y espera *2 minutos*.\n\n" +
-      "¿Se restableció el internet? (sí/no)"
+        "Ahora desconecta de la luz *módem y router* por *3 minutos* ⏱️\n" +
+        "Luego conéctalos y espera *2 minutos*.\n\n" +
+        "¿Se restableció el internet? (sí/no)"
     );
     return;
   }
@@ -131,9 +141,9 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
     await updateSession({ step: 4, data: { ...data, cables_checked: true } });
     await send(
       "Gracias.\n" +
-      "Ahora desconecta de la luz *módem y router* por *3 minutos* ⏱️\n" +
-      "Luego conéctalos y espera *2 minutos*.\n\n" +
-      "¿Se restableció el internet? (sí/no)"
+        "Ahora desconecta de la luz *módem y router* por *3 minutos* ⏱️\n" +
+        "Luego conéctalos y espera *2 minutos*.\n\n" +
+        "¿Se restableció el internet? (sí/no)"
     );
     return;
   }
@@ -170,7 +180,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
     await updateSession({ step: 6, data: { ...data, ssid_visible: false } });
     await send(
       "Revisa la *etiqueta detrás del módem*: ahí viene el nombre de la red (SSID) y la contraseña.\n" +
-      "¿Ya intentaste conectarte con esos datos? (sí/no)"
+        "¿Ya intentaste conectarte con esos datos? (sí/no)"
     );
     return;
   }
@@ -223,11 +233,11 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
 
     await notifyAdmin(
       `🛠️ REPORTE DE FALLA ${r.folio}\n` +
-      `Nombre: ${r.nombre}\n` +
-      `Tel: ${phoneE164}\n` +
-      `Tipo: ${data.tipo || "N/A"}\n` +
-      `Luces: ${data.lights || "N/A"}\n` +
-      `Descripción: ${r.descripcion}`
+        `Nombre: ${r.nombre}\n` +
+        `Tel: ${phoneE164}\n` +
+        `Tipo: ${data.tipo || "N/A"}\n` +
+        `Luces: ${data.lights || "N/A"}\n` +
+        `Descripción: ${r.descripcion}`
     );
 
     await closeSession();
