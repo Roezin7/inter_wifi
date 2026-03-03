@@ -38,7 +38,7 @@ function menu(profileName) {
     `3) Registrar un pago\n` +
     `4) Info (horarios, ubicación, formas de pago)\n\n` +
     `Responde con *1, 2, 3, 4* o escribe tu necesidad 🙂\n\n` +
-    `Comandos: *menú*, *cancelar*, *agente*`
+    `Comandos: *menú*, *inicio*, *cancelar*, *agente*`
   );
 }
 
@@ -107,8 +107,10 @@ function isGreetingOnly(text) {
   );
 }
 
+// ✅ menú principal (sinónimos)
 function isMenuWord(text) {
-  return /^(menu|menú|inicio|opciones|volver|regresar)$/i.test(norm(text));
+  // "menú" e "inicio" SIEMPRE significan "menú principal"
+  return /^(menu|menú|inicio|principal|opciones|volver|regresar|home|start)$/i.test(norm(text));
 }
 
 function isCancelWord(text) {
@@ -121,7 +123,7 @@ function isAgentWord(text) {
 
 // ✅ “continuar” explícito (IMPORTANT: NO debe caer al flow como respuesta)
 function isContinueWord(text) {
-  return /^(continuar|continua|seguir|sigue|dale|va|ok continuar|listo continuar|continue)$/i.test(
+  return /^(continuar|continua|seguir|sigue|dale|ok continuar|listo continuar|continue)$/i.test(
     norm(text)
   );
 }
@@ -177,12 +179,21 @@ function mapIntentFast(text) {
   return null;
 }
 
-// ✅ “FAQ override” aunque haya sesión
+// ✅ “FAQ override” aunque haya sesión (si el usuario pide INFO en medio de otro flow)
 function shouldForceFaqSwitch(text) {
   const t = norm(text);
   return /(formas de pago|forma de pago|como pagar|cómo pagar|metodos de pago|métodos de pago|transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|banco|beneficiario|horario|horarios|ubicacion|ubicación|direccion|dirección|precio|precios|paquete|paquetes|plan|planes|informacion|información|info)/i.test(
     t
   );
+}
+
+// ✅ Si estás dentro de FAQ y el usuario ahora quiere una acción (contrato/pago/falla), salimos de FAQ
+function shouldExitFaqToFlow(text) {
+  const intent = mapIntentFast(text);
+  if (intent === "CONTRATO") return "CONTRATO";
+  if (intent === "PAGO") return "PAGO";
+  if (intent === "FALLA") return "FALLA";
+  return null;
 }
 
 function getIntro(flow, inbound) {
@@ -424,8 +435,43 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // ✅ FIX PRINCIPAL: “menú” con sesión abierta -> NO mandes greeting+menú (eso se ve doble/bug)
-    if (isMenuWord(inboundText)) {
+    // ✅ FAQ: “menú/inicio” => salir de FAQ y mostrar MENÚ PRINCIPAL (y cerrar FAQ)
+    if (isFaqSession && isMenuWord(inboundText)) {
+      await closeSession(existing.session_id, client, "faq_exit_to_main_menu");
+      await client.query("COMMIT");
+      await sendAndLog({
+        sessionId: null,
+        flow: "MENU",
+        step: 0,
+        kind: "faq_exit_to_menu",
+        text: menu(inbound.profileName),
+      });
+      return;
+    }
+
+    // ✅ FAQ: si el usuario ya quiere una acción (contrato/pago/falla), switch de flow
+    if (isFaqSession) {
+      const nextFlow = shouldExitFaqToFlow(inboundText);
+      if (nextFlow) {
+        await closeSession(existing.session_id, client, "faq_switch_flow");
+        const newSession = await createSession(
+          { phoneE164: inbound.phoneE164, flow: nextFlow, step: 1, data: { menu_mode: false } },
+          client
+        );
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: newSession.session_id,
+          flow: nextFlow,
+          step: 1,
+          kind: "faq_switch_to_flow_by_text",
+          text: getIntro(nextFlow, inbound),
+        });
+        return;
+      }
+    }
+
+    // ✅ Menú principal con sesión abierta (NO aplica si estás en FAQ; FAQ ya se manejó arriba)
+    if (!isFaqSession && isMenuWord(inboundText)) {
       await updateSession(
         {
           sessionId: existing.session_id,
@@ -471,7 +517,7 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // ✅ “continuar”: limpia menu_mode y NO lo pases al flow (para que no se tome como respuesta)
+    // ✅ “continuar”: limpia menu_mode y NO lo pases al flow
     if (isContinueWord(inboundText)) {
       if (menuMode) {
         await updateSession(
@@ -495,7 +541,7 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // ✅ Si el usuario pide INFO (formas de pago/horarios/etc) en medio de otro flow: switch a FAQ
+    // ✅ Si el usuario pide INFO en medio de otro flow: switch a FAQ
     if (!isFaqSession && shouldForceFaqSwitch(inboundText)) {
       await closeSession(existing.session_id, client, "switch_to_faq");
       const newSession = await createSession(
@@ -516,7 +562,7 @@ async function handleInbound({ inbound, send }) {
     // ===== números 1-4 =====
     if (mainChoice) {
       if (isFaqSession) {
-        // FAQ interpreta 1-4 internamente
+        // FAQ interpreta 1-4 internamente (horarios/ubicación/pagos/precios)
         await updateSession(
           {
             sessionId: existing.session_id,
@@ -543,7 +589,7 @@ async function handleInbound({ inbound, send }) {
         });
         return;
       }
-      // Si NO hay menu_mode => NO cambies flow (evita bugs por “1/2/3/4” accidentales)
+      // Si NO hay menu_mode => NO cambies flow
     }
 
     // si llega texto real, apaga menu_mode (para que no quede pegado)
