@@ -7,14 +7,13 @@ const {
 } = require("../../utils/validators");
 
 const { createContract } = require("../../services/contractsService");
-const { notifyAdmin, buildNewContractAdminMsg } = require("../../services/notifyService");
+const {
+  notifyAdmin,
+  buildNewContractAdminMsg,
+} = require("../../services/notifyService");
 const { parsePhoneE164 } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
-
-const {
-  resolveAndStoreMedia,
-  ineQualityMessage,
-} = require("../../services/mediaService");
+const { storeToR2 } = require("../../services/r2UploadService");
 
 // ✅ Para evitar que replies/templates te cambien textos sin querer
 const USE_TEMPLATES = false;
@@ -34,7 +33,8 @@ function looksLikeAddress(text) {
 
   const hasNumber = /\d/.test(s);
   const hasComma = s.includes(",");
-  const hasColWord = /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
+  const hasColWord =
+    /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
 
   const words = s.split(/\s+/).filter(Boolean);
   if (words.length === 1 && !hasNumber) return false;
@@ -56,19 +56,24 @@ function splitColoniaAndAddress(text) {
   const s = String(text || "").trim();
   if (!s) return { colonia: "", calleNum: "" };
 
+  // "Centro, Hidalgo 311"
   if (s.includes(",")) {
     const [a, b] = s.split(",").map((x) => x.trim());
     return { colonia: a || "", calleNum: b || "" };
   }
 
+  // Si parece solo dirección (tiene número, pero no coma y no "colonia/centro...")
+  // ej: "Hidalgo 311"
   const hasNumber = /\d/.test(s);
   const mentionsCol =
-    /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro|morelos|am[eé]ricas)/i.test(s);
-
+    /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro|morelos|am[eé]ricas)/i.test(
+      s
+    );
   if (hasNumber && !mentionsCol) {
     return { colonia: "", calleNum: s };
   }
 
+  // "Centro Hidalgo 311" (sin coma)
   if (hasNumber && s.length >= 8) {
     const parts = s.split(/\s+/).filter(Boolean);
     const colonia = parts[0] || "";
@@ -76,6 +81,7 @@ function splitColoniaAndAddress(text) {
     return { colonia, calleNum };
   }
 
+  // solo colonia
   return { colonia: s, calleNum: "" };
 }
 
@@ -98,6 +104,10 @@ function confirmColonia(col) {
   return `¿Te refieres a la colonia *${col}*? Responde *sí* o *no* 🙂`;
 }
 
+/**
+ * Normaliza media (WASender):
+ * Recomendado: inbound.media.items[0] = { url, mimetype, mediaKey, fileName, id }
+ */
 function pickMedia(inboundMedia) {
   const urls = inboundMedia?.urls || [];
   const items = inboundMedia?.items || [];
@@ -113,24 +123,12 @@ function pickMedia(inboundMedia) {
 }
 
 function looksLikeYes(t) {
-  return /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(String(t || "").trim());
+  return /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(
+    String(t || "").trim()
+  );
 }
 function looksLikeNo(t) {
   return /(no|nel|incorrecto|equivocado|error)/i.test(String(t || "").trim());
-}
-
-// Mensaje pro (sin pedir reenviar “por reenviar”, sino “retomar foto”)
-function askIneFront() {
-  return (
-    "Listo ✅ Ahora envíame foto de tu *INE (frente)* 📸\n\n" +
-    "Tip rápido: buena luz, sin reflejos, y que se vean las 4 esquinas."
-  );
-}
-function askIneBack() {
-  return (
-    "Gracias. Ahora envíame la foto de tu *INE (atrás)* 📸\n\n" +
-    "Tip rápido: buena luz, sin reflejos, y que se vean las 4 esquinas."
-  );
 }
 
 // =====================
@@ -151,11 +149,13 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     const { colonia: coloniaRaw, calleNum } = splitColoniaAndAddress(txt);
 
+    // Si mandó "Hidalgo 311" (solo dirección) -> pedir colonia
     if (!coloniaRaw && looksLikeAddress(txt)) {
       await send("¿En qué *colonia* queda esa calle? (Ej: Centro)");
       return;
     }
 
+    // Resolver colonia contra DB
     const res = await resolveColonia(coloniaRaw, { limit: 5 });
 
     if (!res?.ok) {
@@ -163,6 +163,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
+    // ✅ Si está claro
     if (res.autoAccept) {
       const nextData = {
         ...data,
@@ -171,6 +172,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         colonia_confirmed: true,
       };
 
+      // ✅ Si ya mandó calle y número, saltamos STEP 11
       if (calleNum && /\d/.test(calleNum) && calleNum.length >= 4) {
         await updateSession({ step: 2, data: { ...nextData, calle_numero: calleNum } });
         await send(
@@ -188,6 +190,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
+    // ✅ Si hay duda, pedimos confirmación
     const nextData = {
       ...data,
       colonia_input: coloniaRaw,
@@ -205,8 +208,9 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   if (step === 10) {
     if (looksLikeYes(txt)) {
       const colonia = data.colonia_guess;
-      const pending = String(data.calle_numero_pending || "").trim();
 
+      // si ya había calle pendiente, saltamos a nombre
+      const pending = String(data.calle_numero_pending || "").trim();
       if (pending && /\d/.test(pending)) {
         const nextData = {
           ...data,
@@ -291,11 +295,11 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     await updateSession({ step: 4, data: { ...data, telefono_contacto: tel } });
-    await send(askIneFront());
+    await send("Listo ✅ Ahora envíame foto de tu *INE (frente)* 📸");
     return;
   }
 
-  // STEP 4: INE frente (validar + subir a R2)
+  // STEP 4: INE frente (subir a R2)
   if (step === 4) {
     if (!hasMediaUrls(inbound.media)) {
       await send("Necesito la *foto del frente* de la INE 📸 (envíala como imagen, porfa)");
@@ -305,51 +309,35 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     const m = pickMedia(inbound.media);
 
     if (!m.url) {
-      await send("No pude leer la imagen 😅 Envíala como *foto* por favor.");
+      await send("No pude leer la imagen 😅 ¿Me la reenvías como *foto*?");
       return;
     }
 
-    // Para .enc: necesitamos mediaKey + mimetype
-    if (/\.enc(\?|$)/i.test(String(m.url)) && (!m.mediaKey || !m.mimetype)) {
+    // 🔥 CLAVE: para descifrar .enc se necesita mediaKey + mimetype
+    if (!m.mediaKey || !m.mimetype) {
       console.error("[CONTRATO][INE_FRENTE] missing mediaKey/mimetype", {
         hasUrl: !!m.url,
         hasMediaKey: !!m.mediaKey,
         mimetype: m.mimetype,
       });
-      await send("No pude procesar esa imagen 😅 Envíala como *foto* por favor.");
+      await send("No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.");
       return;
     }
 
-    // ✅ Resolver + validar INE antes de subir
-    const out = await resolveAndStoreMedia({
-      providerUrl: m.url,
-      mediaId: m.id || null,
-      mime: m.mimetype || "image/jpeg",
-      mediaKey: m.mediaKey || null,
-      phoneE164,
-      kind: "contracts/ine",
-      validateIne: true,
-      forceUpload: true,
-    });
-
-    if (!out?.publicUrl) {
-      // rechazo por calidad (pro, sin reenviar)
-      if (out?.source === "quality_reject" && out?.quality?.reason) {
-        await send(ineQualityMessage(out.quality.reason));
-        return;
-      }
-
-      // problemas técnicos
-      console.error("[CONTRATO][INE_FRENTE] resolveAndStoreMedia failed:", {
-        source: out?.source,
-        reason: out?.errorReason,
-        err: out?.error,
+    let uploaded;
+    try {
+      uploaded = await storeToR2({
+        url: m.url,
+        mediaKey: m.mediaKey,
+        mimetype: m.mimetype,
+        fileName: m.fileName,
+        folder: "contracts/ine",
+        filenamePrefix: "ine_frente",
+        phoneE164,
       });
-
-      await send(
-        "Tuve un problema procesando la foto 😅\n" +
-          "Por favor envíala nuevamente como *foto* (no documento)."
-      );
+    } catch (e) {
+      console.error("[CONTRATO][INE_FRENTE] storeToR2 failed:", e?.message || e);
+      await send("Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?");
       return;
     }
 
@@ -357,18 +345,19 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       step: 5,
       data: {
         ...data,
-        ine_frente_url: out.publicUrl,
+        ine_frente_url: uploaded.publicUrl, // ✅ pública (no .enc)
         ine_frente_media_id: m.id || null,
-        ine_frente_mime: out.contentType || m.mimetype || null,
-        ine_frente_quality: out.quality || null,
+        ine_frente_mime: uploaded.contentType || m.mimetype || null,
+        ine_frente_source_url: m.url, // auditoría
+        ine_frente_source_mediaKey: m.mediaKey, // auditoría
       },
     });
 
-    await send(askIneBack());
+    await send("Gracias. Ahora envíame la foto de tu *INE (atrás)* 📸");
     return;
   }
 
-  // STEP 5: INE reverso (validar + crear contrato)
+  // STEP 5: INE atrás + crear contrato (subir a R2)
   if (step === 5) {
     if (!hasMediaUrls(inbound.media)) {
       await send("Necesito la *foto de atrás* de la INE 📸 (envíala como imagen, porfa)");
@@ -378,69 +367,58 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     const m = pickMedia(inbound.media);
 
     if (!m.url) {
-      await send("No pude leer la imagen 😅 Envíala como *foto* por favor.");
+      await send("No pude leer la imagen 😅 ¿Me la reenvías como *foto*?");
       return;
     }
 
-    if (/\.enc(\?|$)/i.test(String(m.url)) && (!m.mediaKey || !m.mimetype)) {
+    if (!m.mediaKey || !m.mimetype) {
       console.error("[CONTRATO][INE_REVERSO] missing mediaKey/mimetype", {
         hasUrl: !!m.url,
         hasMediaKey: !!m.mediaKey,
         mimetype: m.mimetype,
       });
-      await send("No pude procesar esa imagen 😅 Envíala como *foto* por favor.");
+      await send("No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.");
       return;
     }
 
     // anti duplicado (por id/url)
     const sameId =
       data.ine_frente_media_id && m.id && String(m.id) === String(data.ine_frente_media_id);
-    const sameUrl = data.ine_frente_url && m.url && String(m.url) === String(data.ine_frente_url);
+    const sameUrl =
+      data.ine_frente_source_url && m.url && String(m.url) === String(data.ine_frente_source_url);
 
     if (sameId || sameUrl) {
       await send(
-        "Me llegó la misma foto que la del *frente* 😅\n\n" +
-          "Envíame ahora la INE *por atrás* (que se vean las 4 esquinas y texto nítido)."
+        "Me llegó la misma imagen que la del *frente* 😅\n" +
+          "¿Me reenvías la foto de la INE *por atrás*? 📸"
       );
       return;
     }
 
-    const out = await resolveAndStoreMedia({
-      providerUrl: m.url,
-      mediaId: m.id || null,
-      mime: m.mimetype || "image/jpeg",
-      mediaKey: m.mediaKey || null,
-      phoneE164,
-      kind: "contracts/ine",
-      validateIne: true,
-      forceUpload: true,
-    });
-
-    if (!out?.publicUrl) {
-      if (out?.source === "quality_reject" && out?.quality?.reason) {
-        await send(ineQualityMessage(out.quality.reason));
-        return;
-      }
-
-      console.error("[CONTRATO][INE_REVERSO] resolveAndStoreMedia failed:", {
-        source: out?.source,
-        reason: out?.errorReason,
-        err: out?.error,
+    let uploaded;
+    try {
+      uploaded = await storeToR2({
+        url: m.url,
+        mediaKey: m.mediaKey,
+        mimetype: m.mimetype,
+        fileName: m.fileName,
+        folder: "contracts/ine",
+        filenamePrefix: "ine_reverso",
+        phoneE164,
       });
-
-      await send(
-        "Tuve un problema procesando la foto 😅\n" +
-          "Por favor envíala nuevamente como *foto* (no documento)."
-      );
+    } catch (e) {
+      console.error("[CONTRATO][INE_REVERSO] storeToR2 failed:", e?.message || e);
+      await send("Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?");
       return;
     }
 
     const finalData = {
       ...data,
-      ine_reverso_url: out.publicUrl,
+      ine_reverso_url: uploaded.publicUrl, // ✅ pública
       ine_reverso_media_id: m.id || null,
-      ine_reverso_mime: out.contentType || m.mimetype || null,
-      ine_reverso_quality: out.quality || null,
+      ine_reverso_mime: uploaded.contentType || m.mimetype || null,
+      ine_reverso_source_url: m.url,
+      ine_reverso_source_mediaKey: m.mediaKey,
     };
 
     const c = await createContract({
@@ -450,18 +428,15 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       calle_numero: finalData.calle_numero,
       telefono_contacto: finalData.telefono_contacto,
 
+      // ✅ ya NO son .enc (son URLs públicas R2/CDN)
       ine_frente_url: finalData.ine_frente_url,
       ine_reverso_url: finalData.ine_reverso_url,
 
-      // opcionales (auditoría)
+      // opcionales
       ine_frente_media_id: finalData.ine_frente_media_id,
       ine_reverso_media_id: finalData.ine_reverso_media_id,
       ine_frente_mime: finalData.ine_frente_mime,
       ine_reverso_mime: finalData.ine_reverso_mime,
-
-      // telemetría pro (si tu DB lo soporta, si no, ignóralo)
-      ine_frente_quality_score: finalData.ine_frente_quality?.score ?? null,
-      ine_reverso_quality_score: finalData.ine_reverso_quality?.score ?? null,
     });
 
     await notifyAdmin(buildNewContractAdminMsg(c));
