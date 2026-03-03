@@ -10,16 +10,12 @@ const {
   extractText,
 } = require("../utils/waPayload");
 
-const { sendText, sendImage } = require("../services/wasenderService"); // ✅ add sendImage
+const { sendText, sendImage } = require("../services/wasenderService");
 const { handleInbound, menu } = require("../handlers/inbound");
 const { logger } = require("../utils/logger");
 
 const router = express.Router();
 
-/**
- * ✅ PRO: Extractor tolerante a estructuras distintas (messages array / object)
- * La meta: SIEMPRE sacar un ID estable si existe.
- */
 function getProviderMsgId(payload) {
   try {
     const direct =
@@ -51,9 +47,6 @@ function getProviderMsgId(payload) {
   }
 }
 
-/**
- * ✅ Texto robusto (si extractText falla o no aplica)
- */
 function safeExtractText(payload) {
   try {
     const t = extractText(payload);
@@ -84,10 +77,6 @@ function safeExtractText(payload) {
   );
 }
 
-/**
- * ✅ Extrae 1 media "raw" desde payload Wasender:
- * payload.data.messages.message.{imageMessage|documentMessage|videoMessage|audioMessage|stickerMessage}
- */
 function extractWasenderMedia(payload) {
   const msg = payload?.data?.messages?.message;
 
@@ -102,16 +91,10 @@ function extractWasenderMedia(payload) {
   return null;
 }
 
-/**
- * ✅ Normaliza media al formato que tu bot usa:
- * inbound.media.urls[] + inbound.media.count
- * y además conserva inbound.media.items[] con meta (mediaKey/mimetype/id...)
- */
 function normalizeInboundMedia(media) {
   const out = { urls: [], count: 0, items: [] };
   if (!media) return out;
 
-  // Legacy: ya viene como { urls, count } (y tal vez items)
   if (Array.isArray(media.urls)) {
     out.urls = media.urls.filter(Boolean).map(String);
     out.count = Number(media.count || out.urls.length || 0);
@@ -119,7 +102,6 @@ function normalizeInboundMedia(media) {
     return out;
   }
 
-  // Wasender raw: { url, mediaKey, mimetype, fileName... }
   const url = media.url || media.href || media.link || null;
   if (url) {
     out.urls = [String(url)];
@@ -139,7 +121,6 @@ function normalizeInboundMedia(media) {
     return out;
   }
 
-  // Array de medias
   if (Array.isArray(media)) {
     const items = media
       .map((m) => {
@@ -164,7 +145,6 @@ function normalizeInboundMedia(media) {
     return out;
   }
 
-  // { media: [...] }
   if (Array.isArray(media.media)) {
     return normalizeInboundMedia(media.media);
   }
@@ -172,17 +152,12 @@ function normalizeInboundMedia(media) {
   return out;
 }
 
-/**
- * ✅ Debug seguro: recorta payload para logs
- * (evita logs gigantes y filtra cosas obvias)
- */
 function safePayloadPreview(payload) {
   try {
     const p = payload || {};
     const msg = p?.data?.messages?.message || null;
     const key = p?.data?.messages?.key || null;
 
-    // Preview chico
     return {
       event: p?.event || null,
       fromMe: !!isFromMe(p),
@@ -209,21 +184,13 @@ function safePayloadPreview(payload) {
   }
 }
 
-/**
- * ✅ Unified sender:
- * - send("hola") -> texto
- * - send({ type:"image", url, caption }) -> imagen
- * - send({ type:"document", url, filename, caption }) -> documento (opcional)
- */
 async function sendOutbound({ toE164, out }) {
-  // texto plano
   if (typeof out === "string") {
     const text = String(out || "");
     if (!text) return;
     return sendText({ toE164, text });
   }
 
-  // objeto payload
   if (out && typeof out === "object") {
     const type = String(out.type || "").toLowerCase();
 
@@ -234,29 +201,13 @@ async function sendOutbound({ toE164, out }) {
       return sendImage({ toE164, url: String(url), caption });
     }
 
-    // (Opcional) si luego quieres PDF/archivo
-    if (type === "document") {
-      // Si tu wasenderService ya tiene sendDocument, aquí lo conectas.
-      // throw new Error("sendOutbound(document) not implemented");
-      const url = out.url || out.documentUrl || out.link;
-      const caption = String(out.caption || "");
-      const filename = out.filename || out.fileName || "documento";
-      if (!url) throw new Error("sendOutbound(document) missing url");
-      if (typeof sendDocument !== "function") {
-        throw new Error("sendDocument not available in wasenderService");
-      }
-      return sendDocument({ toE164, url: String(url), filename: String(filename), caption });
-    }
-
     throw new Error(`sendOutbound unsupported type=${type || "(empty)"}`);
   }
 
-  // nada
   return;
 }
 
 router.post("/webhook", async (req, res) => {
-  // ✅ SIEMPRE responder 200 rápido
   res.status(200).json({ ok: true });
 
   try {
@@ -264,13 +215,9 @@ router.post("/webhook", async (req, res) => {
 
     const payload = req.body || {};
 
-    // Ignora tests
     if (payload.event === "webhook.test" || payload?.data?.test === true) return;
-
-    // Ignora mensajes que tú mismo enviaste
     if (isFromMe(payload)) return;
 
-    // ✅ DEBUG: payload preview + media crudo
     console.log("[WASENDER] payload.preview =", JSON.stringify(safePayloadPreview(payload), null, 2));
 
     const rawMedia = extractWasenderMedia(payload);
@@ -288,17 +235,11 @@ router.post("/webhook", async (req, res) => {
 
     const profileName = extractProfileName(payload);
 
-    // ✅ Usa media desde payload (con mediaKey/mimetype)
     const media = normalizeInboundMedia(rawMedia);
-
     const inboundText = String(safeExtractText(payload) || "").trim();
 
-    // ✅ sender que soporta texto e imagen
-    const send = async (out) => {
-      await sendOutbound({ toE164: phoneE164, out });
-    };
+    const send = async (out) => sendOutbound({ toE164: phoneE164, out });
 
-    // ✅ si llega vacío total, solo manda menú (SIN abrir sesión)
     if (!inboundText && (!media || media.count === 0)) {
       await send(menu(profileName));
       return;
@@ -310,11 +251,11 @@ router.post("/webhook", async (req, res) => {
         profileName,
         text: inboundText,
         media,
-        raw: payload, // ✅ aquí está el payload completo si lo ocupas en flows
+        raw: payload,
         providerSession,
         providerMsgId,
       },
-      send, // ✅ ahora soporta {type:"image", url, caption}
+      send,
     });
   } catch (err) {
     logger?.error?.("Webhook error", err);

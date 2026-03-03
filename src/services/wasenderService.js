@@ -38,46 +38,95 @@ function pickErrBody(err) {
   }
 }
 
-// OJO: la doc de WasenderAPI para texto es POST /api/send-message  [oai_citation:3‡WASenderApi](https://wasenderapi.com/api-docs/messages/send-audio-message)
-async function _sendTextOnce({ toE164, text }) {
+function ensureConfig() {
   if (!WASENDER_BASE || !WASENDER_TOKEN) {
     throw new Error("WASENDER_BASE_URL / WASENDER_TOKEN missing");
   }
+}
+
+function buildHeaders() {
+  return {
+    Authorization: `Bearer ${WASENDER_TOKEN}`,
+    "Content-Type": "application/json",
+  };
+}
+
+// ✅ Texto: POST /api/send-message { to, text }
+async function _sendTextOnce({ toE164, text }) {
+  ensureConfig();
 
   const url = `${WASENDER_BASE}/api/send-message`;
 
   const res = await axios.post(
     url,
-    // Ajusta si tu proveedor pide "phone" en vez de "to"
-    { to: toE164, text },
+    { to: String(toE164), text: String(text || "") },
     {
-      headers: {
-        Authorization: `Bearer ${WASENDER_TOKEN}`,
-        "Content-Type": "application/json",
-      },
+      headers: buildHeaders(),
       timeout: 20000,
-      // Para poder inspeccionar bodies HTML/404 sin que axios reviente “raro”
       validateStatus: () => true,
     }
   );
 
   if (res.status < 200 || res.status >= 300) {
-    // Si te responde HTML, casi seguro es base URL mal o endpoint web equivocado
     if (looksLikeHtml(res.data)) {
       throw new Error(
         `Wasender returned HTML (likely wrong endpoint). ` +
-          `Check WASENDER_BASE_URL and use /api/send-message. ` +
-          `status=${res.status}`
+          `Check WASENDER_BASE_URL and use /api/send-message. status=${res.status}`
       );
     }
 
     const retryAfter =
-      Number(res.data?.retry_after) ||
-      Number(res.headers?.["retry-after"]) ||
-      0;
+      Number(res.data?.retry_after) || Number(res.headers?.["retry-after"]) || 0;
 
     const e = new Error(
-      `Wasender send-message failed: ${res.status} ${typeof res.data === "string" ? res.data.slice(0, 300) : JSON.stringify(res.data)}`
+      `Wasender send-message(text) failed: ${res.status} ${
+        typeof res.data === "string" ? res.data.slice(0, 300) : JSON.stringify(res.data)
+      }`
+    );
+    e.status = res.status;
+    e.retryAfter = retryAfter;
+    e.body = res.data;
+    throw e;
+  }
+
+  return res.data;
+}
+
+// ✅ Imagen: POST /api/send-message { to, text?, imageUrl }
+async function _sendImageOnce({ toE164, url, caption }) {
+  ensureConfig();
+
+  const endpoint = `${WASENDER_BASE}/api/send-message`;
+
+  const res = await axios.post(
+    endpoint,
+    {
+      to: String(toE164),
+      text: String(caption || ""),
+      imageUrl: String(url),
+    },
+    {
+      headers: buildHeaders(),
+      timeout: 30000,
+      validateStatus: () => true,
+    }
+  );
+
+  if (res.status < 200 || res.status >= 300) {
+    if (looksLikeHtml(res.data)) {
+      throw new Error(
+        `Wasender returned HTML (likely wrong endpoint). ` +
+          `Check WASENDER_BASE_URL and use /api/send-message. status=${res.status}`
+      );
+    }
+
+    const retryAfter =
+      Number(res.data?.retry_after) || Number(res.headers?.["retry-after"]) || 0;
+
+    const e = new Error(
+      `Wasender send-message(image) failed: ${res.status} ${
+        typeof res.data === "string" ? res.data.slice(0, 300) : JSON.stringify(res.data)
+      }`
     );
     e.status = res.status;
     e.retryAfter = retryAfter;
@@ -92,9 +141,8 @@ async function sendText({ toE164, text }) {
   const msg = String(text || "").trim();
   if (!toE164 || !msg) return { ok: true, skipped: true };
 
-  // ✅ Serializa globalmente
   globalQueue = globalQueue
-    .catch(() => {}) // no rompas cadena si el anterior falló
+    .catch(() => {})
     .then(async () => {
       await throttleGlobal();
 
@@ -112,7 +160,6 @@ async function sendText({ toE164, text }) {
             Number(err?.response?.headers?.["retry-after"]) ||
             0;
 
-          // ✅ Rate limit -> espera y reintenta
           if (status === 429 && attempt < MAX_RETRIES) {
             const waitMs = Math.max(1000, (retryAfter || 5) * 1000);
             await sleep(waitMs + 250);
@@ -120,11 +167,8 @@ async function sendText({ toE164, text }) {
             continue;
           }
 
-          // Error final (incluye body recortado)
           const body = pickErrBody(err);
-          throw new Error(
-            `Wasender send-message failed: ${status || "ERR"} body=${body}`
-          );
+          throw new Error(`Wasender send-message(text) failed: ${status || "ERR"} body=${body}`);
         }
       }
     });
@@ -132,4 +176,45 @@ async function sendText({ toE164, text }) {
   return globalQueue;
 }
 
-module.exports = { sendText };
+async function sendImage({ toE164, url, caption = "" }) {
+  const imgUrl = String(url || "").trim();
+  const cap = String(caption || "").trim();
+
+  if (!toE164 || !imgUrl) return { ok: true, skipped: true };
+
+  globalQueue = globalQueue
+    .catch(() => {})
+    .then(async () => {
+      await throttleGlobal();
+
+      let attempt = 0;
+      while (attempt <= MAX_RETRIES) {
+        try {
+          const out = await _sendImageOnce({ toE164, url: imgUrl, caption: cap });
+          lastSentAt = Date.now();
+          return { ok: true, data: out };
+        } catch (err) {
+          const status = err?.status || err?.response?.status;
+          const retryAfter =
+            Number(err?.retryAfter) ||
+            Number(err?.response?.data?.retry_after) ||
+            Number(err?.response?.headers?.["retry-after"]) ||
+            0;
+
+          if (status === 429 && attempt < MAX_RETRIES) {
+            const waitMs = Math.max(1000, (retryAfter || 5) * 1000);
+            await sleep(waitMs + 250);
+            attempt++;
+            continue;
+          }
+
+          const body = pickErrBody(err);
+          throw new Error(`Wasender send-message(image) failed: ${status || "ERR"} body=${body}`);
+        }
+      }
+    });
+
+  return globalQueue;
+}
+
+module.exports = { sendText, sendImage };
