@@ -221,18 +221,80 @@ async function handleInbound({ inbound, send }) {
   });
   if (!inserted) return;
 
-  async function sendAndLog({ sessionId, flow, step, kind, text }) {
-    let msg = String(text || "").trim();
+  /**
+   * ✅ Sender + logger que soporta:
+   * - sendAndLog({ text: "hola" })
+   * - sendAndLog({ out: { type:"image", url, caption } })
+   *
+   * Importante:
+   * - polishReply SOLO aplica a texto.
+   * - En media NO convertir a string.
+   */
+  async function sendAndLog({ sessionId, flow, step, kind, text, out }) {
+    const payload = out ?? text;
+
+    const isRich =
+      payload &&
+      typeof payload === "object" &&
+      ["image", "document"].includes(String(payload.type || "").toLowerCase());
+
+    // =========================
+    // 1) MENSAJE RICH (IMAGEN / DOC)
+    // =========================
+    if (isRich) {
+      const type = String(payload.type).toLowerCase();
+      const url = payload.url || payload.link || payload.imageUrl || payload.documentUrl || null;
+      const caption = String(payload.caption || "");
+
+      try {
+        await send(payload); // ✅ NO polishReply aquí
+      } catch (e) {
+        logEvent({
+          event: "send_failed",
+          intent: flow,
+          step,
+          kind: kind || `flow_reply_${type}`,
+          error: String(e?.message || e),
+          phone: maskPhone(inbound.phoneE164),
+          provider_msg_id: providerMsgId || null,
+        });
+      }
+
+      await insertWaMessage({
+        sessionId: sessionId || null,
+        phoneE164: inbound.phoneE164,
+        direction: "OUT",
+        body: caption || null,
+        raw: { kind: kind || `flow_reply_${type}`, flow, step, media: { type, url } },
+      });
+
+      logEvent({
+        event: "outgoing_message",
+        kind: kind || `flow_reply_${type}`,
+        intent: flow,
+        step,
+        session_id: sessionId || null,
+        phone: maskPhone(inbound.phoneE164),
+        provider_msg_id: providerMsgId || null,
+      });
+
+      return;
+    }
+
+    // =========================
+    // 2) MENSAJE TEXTO NORMAL
+    // =========================
+    let msg = String(payload || "").trim();
 
     try {
-      const out = await polishReply({
+      const polished = await polishReply({
         intent: flow,
         step,
         rawReply: msg,
         userText: inboundText,
         profileName: inbound.profileName || "",
       });
-      if (out) msg = String(out).trim();
+      if (polished) msg = String(polished).trim();
     } catch {}
 
     try {
@@ -621,41 +683,29 @@ async function handleInbound({ inbound, send }) {
     }
 
     const ctx = {
-  session: locked,
-  inbound,
+      session: locked,
+      inbound,
 
-  send: async (textOut) => {
-    await sendAndLog({
-      sessionId: locked.session_id,
-      flow: locked.flow,
-      step: locked.step,
-      kind: "flow_reply_text",
-      text: textOut
-    });
-  },
+      // ✅ ahora soporta string o {type:"image", url, caption}
+      send: async (out) => {
+        const isObj = out && typeof out === "object";
+        const k =
+          isObj && out.type ? `flow_reply_${String(out.type).toLowerCase()}` : "flow_reply_text";
 
-  // ✅ NUEVO: enviar imagen (requiere que /routes/wasender.js soporte sendImage)
-  sendImage: async (imageUrl, caption = "") => {
-    await sendAndLog({
-      sessionId: locked.session_id,
-      flow: locked.flow,
-      step: locked.step,
-      kind: "flow_reply_image",
-      text: caption || ""
-    });
+        await sendAndLog({
+          sessionId: locked.session_id,
+          flow: locked.flow,
+          step: locked.step,
+          kind: k,
+          out,
+        });
+      },
 
-    // IMPORTANTe:
-    // aquí necesitas que el "send" que recibes en handleInbound
-    // pueda mandar media. Si hoy NO puede, ver nota B.
-    await send({ type: "image", url: imageUrl, caption });
-  },
+      updateSession: async ({ step, data }) =>
+        updateSession({ sessionId: locked.session_id, step, data }, client),
 
-  updateSession: async ({ step, data }) =>
-    updateSession({ sessionId: locked.session_id, step, data }, client),
-
-  closeSession: async () =>
-    closeSession(locked.session_id, client, "flow_done"),
-};
+      closeSession: async () => closeSession(locked.session_id, client, "flow_done"),
+    };
 
     logEvent({
       event: "flow_dispatch",
