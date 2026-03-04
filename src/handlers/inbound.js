@@ -170,7 +170,8 @@ function mapIntentFast(text) {
   )
     return "PAGO";
 
-  if (/(contrat|internet|instal|nuevo servicio)/i.test(t)) return "CONTRATO";
+  // contrato / cobertura
+  if (/(cobertura|cubre|cobren|tienen cobertura|hay cobertura|contrat|internet|instal|instalacion|instalación|nuevo servicio)/i.test(t)) return "CONTRATO";
   if (/(falla|sin internet|no funciona|intermit|lento)/i.test(t)) return "FALLA";
 
   // “pago(s)” solo => FAQ
