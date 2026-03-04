@@ -97,7 +97,7 @@ function isGreetingOnly(text) {
   if (!t) return false;
 
   const hasBusiness =
-    /(contrat|internet|pago|pagos|falla|deposit|transfer|plan|paquete|horario|direccion|ubic|ubicacion|precio)/i.test(
+    /(contrat|internet|cobertura|pago|pagos|falla|deposit|transfer|plan|paquete|horario|direccion|ubic|ubicacion|precio)/i.test(
       t
     );
   if (hasBusiness) return false;
