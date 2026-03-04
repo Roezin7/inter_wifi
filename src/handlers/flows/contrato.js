@@ -7,10 +7,7 @@ const {
 } = require("../../utils/validators");
 
 const { createContract } = require("../../services/contractsService");
-const {
-  notifyAdmin,
-  buildNewContractAdminMsg,
-} = require("../../services/notifyService");
+const { notifyAdmin, buildNewContractAdminMsg } = require("../../services/notifyService");
 const { parsePhoneE164 } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
 const { storeToR2 } = require("../../services/r2UploadService");
@@ -27,70 +24,11 @@ if (USE_TEMPLATES) {
 // =====================
 // Helpers
 // =====================
-function looksLikeAddress(text) {
-  const s = String(text || "").trim();
-  if (s.length < 3) return false;
-
-  const hasNumber = /\d/.test(s);
-  const hasComma = s.includes(",");
-  const hasColWord =
-    /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro)/i.test(s);
-
-  const words = s.split(/\s+/).filter(Boolean);
-  if (words.length === 1 && !hasNumber) return false;
-
-  if (hasComma || hasNumber || hasColWord) return true;
-  if (words.length >= 2 && s.length >= 10) return true;
-
-  return false;
-}
-
-/**
- * Permite:
- * - "Centro, Hidalgo 311" -> colonia=Centro, calleNum=Hidalgo 311
- * - "Centro Hidalgo 311" -> heurística: colonia=Centro, calleNum=Hidalgo 311
- * - "Centro" -> colonia=Centro, calleNum=""
- * - "Hidalgo 311" -> colonia="", calleNum="Hidalgo 311"
- */
-function splitColoniaAndAddress(text) {
-  const s = String(text || "").trim();
-  if (!s) return { colonia: "", calleNum: "" };
-
-  // "Centro, Hidalgo 311"
-  if (s.includes(",")) {
-    const [a, b] = s.split(",").map((x) => x.trim());
-    return { colonia: a || "", calleNum: b || "" };
-  }
-
-  // Si parece solo dirección (tiene número, pero no coma y no "colonia/centro...")
-  // ej: "Hidalgo 311"
-  const hasNumber = /\d/.test(s);
-  const mentionsCol =
-    /(col\.?|colonia|fracc\.?|fraccionamiento|barrio|centro|morelos|am[eé]ricas)/i.test(
-      s
-    );
-  if (hasNumber && !mentionsCol) {
-    return { colonia: "", calleNum: s };
-  }
-
-  // "Centro Hidalgo 311" (sin coma)
-  if (hasNumber && s.length >= 8) {
-    const parts = s.split(/\s+/).filter(Boolean);
-    const colonia = parts[0] || "";
-    const calleNum = parts.slice(1).join(" ");
-    return { colonia, calleNum };
-  }
-
-  // solo colonia
-  return { colonia: s, calleNum: "" };
-}
-
 function intro() {
   if (templates && pick) return pick(templates.contrato_intro, "seed")();
   return (
     "Perfecto 🙌 Para revisar cobertura, dime tu *colonia*.\n" +
-    "Ejemplo: “Centro”.\n\n" +
-    "Tip: también puedes mandar *colonia, calle y número* (ej: “Centro, Hidalgo 311”)."
+    "Ejemplo: “Centro”."
   );
 }
 
@@ -102,6 +40,13 @@ function askColonia() {
 function confirmColonia(col) {
   if (templates && pick) return pick(templates.confirm_colonia, "seed")(col);
   return `¿Te refieres a la colonia *${col}*? Responde *sí* o *no* 🙂`;
+}
+
+function looksLikeYes(t) {
+  return /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(String(t || "").trim());
+}
+function looksLikeNo(t) {
+  return /(no|nel|incorrecto|equivocado|error)/i.test(String(t || "").trim());
 }
 
 /**
@@ -122,13 +67,16 @@ function pickMedia(inboundMedia) {
   };
 }
 
-function looksLikeYes(t) {
-  return /(si|sí|correcto|asi es|así es|exacto|ok|va|confirmo)/i.test(
-    String(t || "").trim()
+// Copy: tips para foto (profesional, sin sonar “regaño”)
+function inePhotoTips(sideLabel) {
+  return (
+    `📸 *INE (${sideLabel})*\n` +
+    `• Buena luz (sin sombras)\n` +
+    `• Sin reflejos / sin flash directo\n` +
+    `• Enfoque nítido (que se lea el texto)\n` +
+    `• Completa dentro del cuadro (sin recortar esquinas)\n` +
+    `• Fondo liso y sin movimiento`
   );
-}
-function looksLikeNo(t) {
-  return /(no|nel|incorrecto|equivocado|error)/i.test(String(t || "").trim());
 }
 
 // =====================
@@ -140,20 +88,16 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   const phoneE164 = session.phone_e164 || inbound.phoneE164;
   const txt = String(inbound.text || "").trim();
 
-  // STEP 1: colonia (o colonia + calle/numero)
+  // =====================
+  // STEP 1: SOLO COLONIA (sin mezclar con dirección)
+  // =====================
   if (step === 1) {
     if (!hasMinLen(txt, 2)) {
       await send(intro());
       return;
     }
 
-    const { colonia: coloniaRaw, calleNum } = splitColoniaAndAddress(txt);
-
-    // Si mandó "Hidalgo 311" (solo dirección) -> pedir colonia
-    if (!coloniaRaw && looksLikeAddress(txt)) {
-      await send("¿En qué *colonia* queda esa calle? (Ej: Centro)");
-      return;
-    }
+    const coloniaRaw = txt;
 
     // Resolver colonia contra DB
     const res = await resolveColonia(coloniaRaw, { limit: 5 });
@@ -163,7 +107,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    // ✅ Si está claro
+    // ✅ Si está claro, NO pedir colonia dos veces
     if (res.autoAccept) {
       const nextData = {
         ...data,
@@ -172,31 +116,20 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         colonia_confirmed: true,
       };
 
-      // ✅ Si ya mandó calle y número, saltamos STEP 11
-      if (calleNum && /\d/.test(calleNum) && calleNum.length >= 4) {
-        await updateSession({ step: 2, data: { ...nextData, calle_numero: calleNum } });
-        await send(
-          `Perfecto ✅ Colonia *${nextData.colonia}* y dirección *${calleNum}*.\n` +
-            "Ahora, ¿cuál es tu *nombre completo*?"
-        );
-        return;
-      }
-
       await updateSession({ step: 11, data: nextData });
       await send(
         `Perfecto ✅ Colonia *${nextData.colonia}*.\n` +
-          "¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)"
+          "Ahora dime tu *calle y número* (Ej: Hidalgo 311)."
       );
       return;
     }
 
-    // ✅ Si hay duda, pedimos confirmación
+    // ✅ Si hay duda, pedimos confirmación (esto NO es “pedir colonia otra vez”, es confirmar)
     const nextData = {
       ...data,
       colonia_input: coloniaRaw,
       colonia_guess: res.best.colonia,
       colonia_candidates: res.candidates,
-      calle_numero_pending: calleNum || null,
     };
 
     await updateSession({ step: 10, data: nextData });
@@ -204,41 +137,28 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
-  // STEP 10: confirmar colonia
+  // =====================
+  // STEP 10: confirmar colonia (solo si hubo duda)
+  // =====================
   if (step === 10) {
     if (looksLikeYes(txt)) {
       const colonia = data.colonia_guess;
 
-      // si ya había calle pendiente, saltamos a nombre
-      const pending = String(data.calle_numero_pending || "").trim();
-      if (pending && /\d/.test(pending)) {
-        const nextData = {
-          ...data,
-          colonia,
-          colonia_confirmed: true,
-          calle_numero: pending,
-        };
-        await updateSession({ step: 2, data: nextData });
-        await send(
-          `Listo ✅ Colonia *${colonia}* y dirección *${pending}*.\n` +
-            "Ahora, ¿cuál es tu *nombre completo*?"
-        );
-        return;
-      }
-
       const nextData = { ...data, colonia, colonia_confirmed: true };
       await updateSession({ step: 11, data: nextData });
+
       await send(
         `Listo ✅ Colonia *${colonia}*.\n` +
-          "¿Me pasas tu *calle y número*? (Ej: Hidalgo 311)"
+          "Ahora dime tu *calle y número* (Ej: Hidalgo 311)."
       );
       return;
     }
 
     if (looksLikeNo(txt)) {
+      // aquí sí regresamos a step 1 para que nos diga colonia correcta
       await updateSession({
         step: 1,
-        data: { ...data, colonia_guess: null, calle_numero_pending: null },
+        data: { ...data, colonia_guess: null, colonia_candidates: null },
       });
       await send("Va 🙂 dime tu *colonia* (Ej: Centro, Las Américas, Morelos).");
       return;
@@ -248,7 +168,9 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
-  // STEP 11: calle + número
+  // =====================
+  // STEP 11: SOLO CALLE + NÚMERO
+  // =====================
   if (step === 11) {
     if (!/\d/.test(txt) || txt.length < 4) {
       await send("¿Me lo mandas como *calle y número*? Ej: “Hidalgo 311” 🙂");
@@ -261,7 +183,9 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
+  // =====================
   // STEP 2: nombre
+  // =====================
   if (step === 2) {
     if (!hasMinLen(txt, 3)) {
       await send("¿Me compartes tu *nombre completo*, por favor?");
@@ -273,7 +197,9 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     return;
   }
 
+  // =====================
   // STEP 3: teléfono
+  // =====================
   if (step === 3) {
     const raw = txt;
     const lower = raw.toLowerCase();
@@ -295,21 +221,31 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     await updateSession({ step: 4, data: { ...data, telefono_contacto: tel } });
-    await send("Listo ✅ Ahora envíame foto de tu *INE (frente)* 📸");
+    await send(
+      "Listo ✅ Ahora envíame foto de tu *INE (frente)* 📸\n\n" +
+        inePhotoTips("frente")
+    );
     return;
   }
 
+  // =====================
   // STEP 4: INE frente (subir a R2)
+  // =====================
   if (step === 4) {
     if (!hasMediaUrls(inbound.media)) {
-      await send("Necesito la *foto del frente* de la INE 📸 (envíala como imagen, porfa)");
+      await send(
+        "Necesito la *foto del frente* de la INE 📸 (envíala como imagen, porfa)\n\n" +
+          inePhotoTips("frente")
+      );
       return;
     }
 
     const m = pickMedia(inbound.media);
 
     if (!m.url) {
-      await send("No pude leer la imagen 😅 ¿Me la reenvías como *foto*?");
+      await send(
+        "No pude leer la imagen 😅 ¿Me la reenvías como *foto*?\n\n" + inePhotoTips("frente")
+      );
       return;
     }
 
@@ -320,7 +256,10 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         hasMediaKey: !!m.mediaKey,
         mimetype: m.mimetype,
       });
-      await send("No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.");
+      await send(
+        "No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.\n\n" +
+          inePhotoTips("frente")
+      );
       return;
     }
 
@@ -337,7 +276,10 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       });
     } catch (e) {
       console.error("[CONTRATO][INE_FRENTE] storeToR2 failed:", e?.message || e);
-      await send("Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?");
+      await send(
+        "Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?\n\n" +
+          inePhotoTips("frente")
+      );
       return;
     }
 
@@ -353,21 +295,31 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       },
     });
 
-    await send("Gracias. Ahora envíame la foto de tu *INE (atrás)* 📸");
+    await send(
+      "Gracias ✅ Ahora envíame la foto de tu *INE (atrás)* 📸\n\n" +
+        inePhotoTips("atrás")
+    );
     return;
   }
 
+  // =====================
   // STEP 5: INE atrás + crear contrato (subir a R2)
+  // =====================
   if (step === 5) {
     if (!hasMediaUrls(inbound.media)) {
-      await send("Necesito la *foto de atrás* de la INE 📸 (envíala como imagen, porfa)");
+      await send(
+        "Necesito la *foto de atrás* de la INE 📸 (envíala como imagen, porfa)\n\n" +
+          inePhotoTips("atrás")
+      );
       return;
     }
 
     const m = pickMedia(inbound.media);
 
     if (!m.url) {
-      await send("No pude leer la imagen 😅 ¿Me la reenvías como *foto*?");
+      await send(
+        "No pude leer la imagen 😅 ¿Me la reenvías como *foto*?\n\n" + inePhotoTips("atrás")
+      );
       return;
     }
 
@@ -377,7 +329,10 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         hasMediaKey: !!m.mediaKey,
         mimetype: m.mimetype,
       });
-      await send("No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.");
+      await send(
+        "No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.\n\n" +
+          inePhotoTips("atrás")
+      );
       return;
     }
 
@@ -390,7 +345,8 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     if (sameId || sameUrl) {
       await send(
         "Me llegó la misma imagen que la del *frente* 😅\n" +
-          "¿Me reenvías la foto de la INE *por atrás*? 📸"
+          "¿Me reenvías la foto de la INE *por atrás*? 📸\n\n" +
+          inePhotoTips("atrás")
       );
       return;
     }
@@ -408,7 +364,10 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       });
     } catch (e) {
       console.error("[CONTRATO][INE_REVERSO] storeToR2 failed:", e?.message || e);
-      await send("Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?");
+      await send(
+        "Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?\n\n" +
+          inePhotoTips("atrás")
+      );
       return;
     }
 
@@ -428,7 +387,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       calle_numero: finalData.calle_numero,
       telefono_contacto: finalData.telefono_contacto,
 
-      // ✅ ya NO son .enc (son URLs públicas R2/CDN)
       ine_frente_url: finalData.ine_frente_url,
       ine_reverso_url: finalData.ine_reverso_url,
 
@@ -440,7 +398,6 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     });
 
     await notifyAdmin(buildNewContractAdminMsg(c));
-
     await closeSession(session.session_id);
 
     await send(
