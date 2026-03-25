@@ -48,7 +48,7 @@ function getFlowLabel(flow) {
 function menu(profileName) {
   const name = profileName ? ` ${profileName}` : "";
   return (
-    `¡Hola${name}! 👋\n` +
+    `¡Hola${name}!\n` +
     `Soy del equipo de InterWIFI.\n\n` +
     `¿En qué te ayudo hoy?\n` +
     `1. Contratar internet\n` +
@@ -56,9 +56,7 @@ function menu(profileName) {
     `3. Registrar un pago\n` +
     `4. Información\n` +
     `5. Cambio de domicilio\n` +
-    `6. Cambiar contraseña\n\n` +
-    `Responde con *1, 2, 3, 4, 5 o 6* o escribe lo que necesitas.\n\n` +
-    `Comandos: *menú*, *inicio*, *cancelar*, *agente*`
+    `6. Cambiar contraseña`
   );
 }
 
@@ -66,11 +64,9 @@ function greetingWithSession(existing) {
   const label = getFlowLabel(existing?.flow);
 
   return (
-    `¡Hola! 👋\n` +
+    `¡Hola!\n` +
     `Veo que tienes un proceso abierto de *${label}*.\n` +
-    `¿Quieres *continuar* o prefieres ver el *menú*?\n` +
-    `Responde: continuar o menú.\n\n` +
-    `Tip: escribe *cancelar* para terminar el proceso.`
+    `¿Seguimos con eso o te muestro el menú?`
   );
 }
 
@@ -590,6 +586,19 @@ async function handleInbound({ inbound, send }) {
       let flow = mapIntentFast(inboundText);
 
       if (!flow) {
+        const knowledge = await resolveFaqReply(inboundText);
+        if (knowledge) {
+          await client.query("COMMIT");
+          await sendAndLog({
+            sessionId: null,
+            flow: "FAQ",
+            step: 0,
+            kind: "knowledge_no_session_fast",
+            out: knowledge,
+          });
+          return;
+        }
+
         const routed = await routeIntent(inboundText);
         const conf = Number(routed?.confidence ?? 0);
 
@@ -600,7 +609,7 @@ async function handleInbound({ inbound, send }) {
             flow: "MENU",
             step: 0,
             kind: "menu_low_conf",
-            out: `Para ayudarte mejor, elige una opción:\n\n${menu(inbound.profileName)}`,
+            out: menu(inbound.profileName),
           });
           return;
         }
@@ -760,7 +769,7 @@ async function handleInbound({ inbound, send }) {
         kind: "menu_soft",
         out:
           `📌 Tienes un proceso abierto de *${label}*.\n` +
-          `Responde *continuar* para seguir, o elige una opción:\n\n` +
+          `Si quieres, seguimos con eso o elige otra opción:\n\n` +
           menu(inbound.profileName),
       });
       return;
@@ -815,7 +824,7 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: "continue_session",
-        out: "Perfecto. Seguimos con tu proceso. Puedes enviarme el dato pendiente cuando quieras.",
+        out: "Perfecto. Seguimos con tu proceso.",
       });
       return;
     }

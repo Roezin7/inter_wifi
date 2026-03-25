@@ -8,18 +8,17 @@ const {
 
 function faqMenu() {
   return (
-    "Claro. Puedo ayudarte con esta información:\n\n" +
+    "Claro, te comparto esta información:\n\n" +
     "1. Horarios\n" +
     "2. Ubicación\n" +
     "3. Formas de pago\n" +
     "4. Planes y precios\n\n" +
-    "Responde con *1, 2, 3 o 4* o escríbeme tu pregunta con tus propias palabras.\n" +
-    "Si quieres volver al menú principal, escribe *inicio*."
+    "Si prefieres, solo dime tu duda."
   );
 }
 
 function footerShort() {
-  return "\n\nSi quieres, puedes escribirme otra pregunta o poner *inicio* para volver al menú principal.";
+  return "\n\nSi necesitas algo más, aquí te apoyo.";
 }
 
 function intro() {
