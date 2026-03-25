@@ -64,6 +64,14 @@ function pickColoniaInput(text, guess) {
   return raw;
 }
 
+function buildManualColoniaCaptureMsg(colonia) {
+  return (
+    `Gracias 😊 Tomo la colonia como *${colonia}*.\n` +
+    "La revisaremos al validar la solicitud.\n\n" +
+    "Ahora compárteme tu *calle y número*."
+  );
+}
+
 // Copy: tips para foto (profesional, sin sonar “regaño”)
 function inePhotoTips(sideLabel) {
   return (
@@ -121,11 +129,25 @@ async function handle({
     const res = await resolveColonia(coloniaRaw, { limit: 5 });
 
     if (!res?.ok) {
-      await send(
-        /[,\d]/.test(txt)
-          ? "Para ubicar bien la cobertura, primero necesito que me compartas solo la *colonia*."
-          : askColonia()
-      );
+      const looksLikeAddress = /[,\d]/.test(txt);
+
+      if (looksLikeAddress && !coloniaGuess) {
+        await send("Para ubicar bien la cobertura, primero necesito que me compartas solo la *colonia*.");
+        return;
+      }
+
+      const nextData = {
+        ...data,
+        colonia_input: coloniaRaw,
+        colonia: coloniaRaw,
+        colonia_confirmed: true,
+        cobertura: "POR_VALIDAR",
+        zona: null,
+        coverage_source: "manual_unlisted",
+      };
+
+      await updateSession({ step: 11, data: nextData });
+      await send(buildManualColoniaCaptureMsg(nextData.colonia));
       return;
     }
 
@@ -136,6 +158,9 @@ async function handle({
         colonia_input: coloniaRaw,
         colonia: res.best.colonia,
         colonia_confirmed: true,
+        cobertura: "SI",
+        zona: null,
+        coverage_source: "db_auto",
       };
 
       await updateSession({ step: 11, data: nextData });
@@ -167,6 +192,9 @@ async function handle({
       const colonia = data.colonia_guess;
 
       const nextData = { ...data, colonia, colonia_confirmed: true };
+      nextData.cobertura = "SI";
+      nextData.zona = null;
+      nextData.coverage_source = "db_confirmed";
       await updateSession({ step: 11, data: nextData });
 
       await send(
@@ -404,6 +432,8 @@ async function handle({
         nombre: finalData.nombre,
         colonia: finalData.colonia,
         calle_numero: finalData.calle_numero,
+        cobertura: finalData.cobertura,
+        zona: finalData.zona,
         telefono_contacto: finalData.telefono_contacto,
 
         ine_frente_url: finalData.ine_frente_url,

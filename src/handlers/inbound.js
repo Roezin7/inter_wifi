@@ -84,12 +84,12 @@ function menuOptions(seed = "") {
 
   return (
     `${intro}\n\n` +
-    `1. Contratar internet\n` +
-    `2. Reportar una falla\n` +
-    `3. Registrar un pago\n` +
-    `4. Información\n` +
-    `5. Cambio de domicilio\n` +
-    `6. Cambiar contraseña\n\n` +
+    `*1*. Contratar internet\n` +
+    `*2*. Reportar una falla\n` +
+    `*3*. Registrar un pago\n` +
+    `*4*. Información\n` +
+    `*5*. Cambio de domicilio\n` +
+    `*6*. Cambiar contraseña\n\n` +
     `Comandos: *menú*, *inicio*, *cancelar*, *agente*`
   );
 }

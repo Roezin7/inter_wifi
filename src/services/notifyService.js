@@ -48,6 +48,8 @@ function buildNewContractAdminMsg(c) {
     `Folio: *${c.folio}*\n` +
     `Nombre: ${c.nombre}\n` +
     `Colonia: ${c.colonia}\n` +
+    `Cobertura: ${c.cobertura || "POR VALIDAR"}\n` +
+    (c.zona ? `Zona: ${c.zona}\n` : "") +
     `Dirección: ${c.calle_numero}\n` +
     `Tel: ${c.telefono_contacto}\n` +
     `Cliente WA: ${c.phone_e164}\n` +

@@ -31,10 +31,10 @@ function faqMenu(seed = "") {
         `faq_options:${seed}`
       ) +
       "\n\n" +
-      "1. Horarios\n" +
-      "2. Ubicación\n" +
-      "3. Formas de pago\n" +
-      "4. Planes y precios\n\n" +
+      "*1*. Horarios\n" +
+      "*2*. Ubicación\n" +
+      "*3*. Formas de pago\n" +
+      "*4*. Planes y precios\n\n" +
       pickText(
         [
           "Si prefieres, solo dime tu duda.",
