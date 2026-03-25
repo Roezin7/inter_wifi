@@ -18,7 +18,7 @@ function isGreetingOnly(text) {
 
   // frena si trae keywords de negocio
   const hasBusiness =
-    /(contrat|instal|servicio|internet|plan|paquete|precio|costo|pago|pagu|deposit|transfer|comprobante|ticket|falla|sin internet|no hay internet|lento|intermit|soporte|reporte|ubic|direccion|horario)/i.test(
+    /(contrat|instal|servicio|internet|plan|paquete|precio|costo|pago|pagu|deposit|transfer|comprobante|ticket|falla|sin internet|no hay internet|lento|intermit|soporte|reporte|ubic|direccion|horario|domicilio|mudanza|contrasena|contraseña|clave)/i.test(
       t
     );
   if (hasBusiness) return false;

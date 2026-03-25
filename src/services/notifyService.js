@@ -56,4 +56,30 @@ function buildNewContractAdminMsg(c) {
   );
 }
 
-module.exports = { notifyAdmin, buildNewContractAdminMsg };
+function buildAddressChangeAdminMsg(data) {
+  return (
+    "🏠 *Solicitud de cambio de domicilio*\n" +
+    `Titular: ${data.nombre || "N/A"}\n` +
+    `Domicilio actual: ${data.domicilio_actual || "N/A"}\n` +
+    `Nuevo domicilio: ${data.nuevo_domicilio || "N/A"}\n` +
+    `Tel: ${data.telefono_contacto || "N/A"}\n` +
+    `Cliente WA: ${data.phone_e164 || "N/A"}`
+  );
+}
+
+function buildPasswordChangeAdminMsg(data) {
+  return (
+    "🔐 *Solicitud de cambio de contraseña*\n" +
+    `Titular: ${data.nombre || "N/A"}\n` +
+    `Domicilio actual: ${data.domicilio_actual || "N/A"}\n` +
+    `Tel: ${data.telefono_contacto || "N/A"}\n` +
+    `Cliente WA: ${data.phone_e164 || "N/A"}`
+  );
+}
+
+module.exports = {
+  notifyAdmin,
+  buildNewContractAdminMsg,
+  buildAddressChangeAdminMsg,
+  buildPasswordChangeAdminMsg,
+};

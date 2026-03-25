@@ -11,7 +11,7 @@ const { pickInboundMedia } = require("../../utils/inboundMedia");
 // Copy / UX
 // =====================
 function intro() {
-  return "Perfecto ✅ ¿A nombre de quién está el servicio?";
+  return "Con gusto. ¿A nombre de quién está el servicio?";
 }
 
 function looksLikeYes(t) {
@@ -92,7 +92,13 @@ function buildAdminPaymentMsg(p) {
  * ✅ Registra el pago AHORA (sin esperar otro inbound).
  * - Si comprobante es .enc, storeToR2 lo desencripta usando mediaKey.
  */
-async function registerPaymentNow({ session, data, phoneE164, dbClient }) {
+async function registerPaymentNow({
+  session,
+  data,
+  phoneE164,
+  dbClient,
+  notifyAdminFn = notifyAdmin,
+}) {
   let comprobantePublicUrl = data.comprobante_public_url || null;
   let comprobanteMime = data.comprobante_mime || null;
 
@@ -129,14 +135,22 @@ async function registerPaymentNow({ session, data, phoneE164, dbClient }) {
     dbClient
   );
 
-  await notifyAdmin(buildAdminPaymentMsg(p));
+  await notifyAdminFn(buildAdminPaymentMsg(p));
   return p;
 }
 
 // =====================
 // Flow
 // =====================
-async function handle({ session, inbound, send, updateSession, closeSession, dbClient }) {
+async function handle({
+  session,
+  inbound,
+  send,
+  updateSession,
+  closeSession,
+  dbClient,
+  notifyAdmin: notifyAdminFn,
+}) {
   const step = Number(session.step || 1);
   const data = session.data || {};
   const txt = String(inbound.text || "").trim();
@@ -152,8 +166,8 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
 
     await send(
       "Gracias. ¿De qué *mes* es el pago y de cuánto fue?\n" +
-        "Ejemplo: *Enero 500*\n\n" +
-        "Tip: también puedes mandar el *comprobante* primero 📎"
+        "Por ejemplo: *enero 500*.\n\n" +
+        "Si quieres, también puedes mandar primero el *comprobante*."
     );
     return;
   }
@@ -166,8 +180,8 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
 
       if (!m.url || !m.mediaKey) {
         await send(
-          "No pude leer el comprobante 😅\n" +
-            "Reenvíalo como *foto o PDF* (no como archivo reenviado raro)."
+          "No pude leer el comprobante.\n" +
+            "Reenvíalo como *foto o PDF*, por favor."
         );
         return;
       }
@@ -184,7 +198,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
           phoneE164,
         });
       } catch (e) {
-        await send("Tuve un tema guardando el comprobante 😅 ¿Me lo reenvías como *foto o PDF*?");
+        await send("Tuve un problema guardando el comprobante. Reenvíalo como *foto o PDF*, por favor.");
         return;
       }
 
@@ -198,24 +212,24 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
       };
 
       await updateSession({ step: 22, data: next });
-      await send("Listo ✅ Ahora dime: ¿de qué *mes* fue y de cuánto? (ej: *Enero 500*)");
+      await send("Listo. Ahora dime de qué *mes* fue y de cuánto.");
       return;
     }
 
     // Si es texto (mes+monto)
     if (!hasMinLen(txt, 3)) {
-      await send("Ponme el *mes* y el *monto* (ej: *Enero 500*).");
+      await send("Compárteme el *mes* y el *monto* del pago.");
       return;
     }
 
     const { mes, monto } = await safeParseMesMonto(txt);
 
     if (!monto) {
-      await send("No alcancé a ver el *monto* 😅 Ponlo así: *Enero 500*.");
+      await send("No alcancé a identificar el *monto*. Envíamelo junto con el mes, por favor.");
       return;
     }
     if (!mes) {
-      await send("Perfecto, ¿de qué *mes* fue el pago? (ej: *Enero*)");
+      await send("Perfecto. ¿De qué *mes* fue el pago?");
       return;
     }
 
@@ -228,18 +242,18 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
   // STEP 22: ya tenemos comprobante, falta mes+monto
   if (step === 22) {
     if (!hasMinLen(txt, 3)) {
-      await send("Dime el *mes* y el *monto* (ej: *Enero 500*).");
+      await send("Compárteme el *mes* y el *monto* del pago.");
       return;
     }
 
     const { mes, monto } = await safeParseMesMonto(txt);
 
     if (!monto) {
-      await send("No alcancé a ver el *monto* 😅 Ponlo así: *Enero 500*.");
+      await send("No alcancé a identificar el *monto*. Envíamelo junto con el mes, por favor.");
       return;
     }
     if (!mes) {
-      await send("Perfecto, ¿de qué *mes* fue el pago? (ej: *Enero*)");
+      await send("Perfecto. ¿De qué *mes* fue el pago?");
       return;
     }
 
@@ -255,17 +269,23 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
       const hasReceipt = !!(data.comprobante_public_url || data.comprobante_url);
 
       if (hasReceipt) {
-        await send("Perfecto ✅ Estoy registrando tu pago…");
+        await send("Perfecto. Estoy registrando tu pago.");
 
         try {
-          const p = await registerPaymentNow({ session, data, phoneE164, dbClient });
+          const p = await registerPaymentNow({
+            session,
+            data,
+            phoneE164,
+            dbClient,
+            notifyAdminFn: notifyAdminFn || notifyAdmin,
+          });
           await closeSession(session.session_id);
-          await send(`¡Gracias! ✅ Pago registrado.\nFolio: *${p.folio}*`);
+          await send(`Gracias. Tu pago quedó registrado.\nFolio: *${p.folio}*`);
           return;
         } catch (e) {
           await send(
-            "Uy 😅 tuve un problema registrando el pago.\n" +
-              "¿Me reenvías el comprobante y el mes/monto? (ej: *Enero 500*)"
+            "Tuve un problema al registrar el pago.\n" +
+              "Reenvíame el comprobante y el dato del mes con el monto, por favor."
           );
           await updateSession({ step: 2, data: { ...data } });
           return;
@@ -273,33 +293,33 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
       }
 
       await updateSession({ step: 3, data });
-      await send("Listo ✅ Envíame el *comprobante* (foto o PDF) 📎");
+      await send("Listo. Envíame el *comprobante* en foto o PDF.");
       return;
     }
 
     if (looksLikeNo(txt)) {
       const backStep = data.comprobante_url || data.comprobante_public_url ? 22 : 2;
       await updateSession({ step: backStep, data: { ...data, mes: null, monto: null } });
-      await send("Va 🙂 corrígeme por favor. ¿De qué mes fue y cuánto pagaste? (ej: *Enero 500*)");
+      await send("De acuerdo. Corrígeme, por favor. ¿De qué mes fue y cuánto pagaste?");
       return;
     }
 
-    await send("¿Me confirmas con un *sí* o *no*? 🙂");
+    await send("Por favor confírmame con *sí* o *no*.");
     return;
   }
 
   // STEP 3: esperar comprobante
   if (step === 3) {
     if (!hasMediaUrls(inbound.media)) {
-      await send("Necesito el *comprobante* (foto/PDF) 📎");
+      await send("Necesito el *comprobante* en foto o PDF.");
       return;
     }
 
     const m = pickInboundMedia(inbound.media);
     if (!m.url || !m.mediaKey) {
       await send(
-        "No pude leer el comprobante 😅\n" +
-          "Reenvíalo como *foto o PDF* (no como reenviado raro)."
+        "No pude leer el comprobante.\n" +
+          "Reenvíalo como *foto o PDF*, por favor."
       );
       return;
     }
@@ -316,7 +336,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
         phoneE164,
       });
     } catch (e) {
-      await send("Tuve un tema guardando el comprobante 😅 ¿Me lo reenvías como *foto o PDF*?");
+      await send("Tuve un problema guardando el comprobante. Reenvíalo como *foto o PDF*, por favor.");
       return;
     }
 
@@ -329,17 +349,23 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
       comprobante_mime: uploaded?.contentType || m.mimetype || null,
     };
 
-    await send("Perfecto ✅ Estoy registrando tu pago…");
+    await send("Perfecto. Estoy registrando tu pago.");
 
     try {
-      const p = await registerPaymentNow({ session, data: next, phoneE164, dbClient });
+      const p = await registerPaymentNow({
+        session,
+        data: next,
+        phoneE164,
+        dbClient,
+        notifyAdminFn: notifyAdminFn || notifyAdmin,
+      });
       await closeSession(session.session_id);
-      await send(`¡Gracias! ✅ Pago registrado.\nFolio: *${p.folio}*`);
+      await send(`Gracias. Tu pago quedó registrado.\nFolio: *${p.folio}*`);
       return;
     } catch (e) {
       await send(
-        "Uy 😅 tuve un problema registrando el pago.\n" +
-          "¿Me lo reenvías como *foto o PDF* y dime *mes+monto*? (ej: *Enero 500*)"
+        "Tuve un problema al registrar el pago.\n" +
+          "Reenvíame el comprobante y vuelve a decirme el mes con el monto, por favor."
       );
       await updateSession({ step: 2, data: { ...data, ...next } });
       return;
@@ -347,7 +373,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
   }
 
   await closeSession(session.session_id);
-  await send("Listo ✅");
+  await send("Listo.");
 }
 
 module.exports = { intro, handle };

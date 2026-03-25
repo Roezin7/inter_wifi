@@ -10,7 +10,14 @@ const RETRIES = Number(process.env.LLM_RETRIES || 2);
 
 // ===== Schemas =====
 const IntentSchema = z.object({
-  intent: z.enum(["CONTRATO", "PAGO", "FALLA", "FAQ"]),
+  intent: z.enum([
+    "CONTRATO",
+    "PAGO",
+    "FALLA",
+    "FAQ",
+    "CAMBIO_DOMICILIO",
+    "CAMBIO_CONTRASENA"
+  ]),
   confidence: z.number().min(0).max(1)
 });
 
@@ -172,7 +179,7 @@ async function routeIntent(text) {
   if (!clean) return { intent: "FAQ", confidence: 0.2 };
 
   const system =
-    "Eres un clasificador de intención para un bot de ISP. Etiquetas: CONTRATO, PAGO, FALLA, FAQ.";
+    "Eres un clasificador de intención para un bot de ISP. Etiquetas: CONTRATO, PAGO, FALLA, FAQ, CAMBIO_DOMICILIO, CAMBIO_CONTRASENA.";
   const user =
     `Mensaje del cliente:\n${clean}\n\n` +
     `Devuelve JSON con { "intent": "...", "confidence": 0..1 }`;
@@ -248,15 +255,16 @@ async function polishReply({ intent, step, rawReply, userText, profileName }) {
 
   const system = `
 Eres un asistente humano profesional de una empresa de internet (InterWIFI) en Encarnación de Díaz, Jalisco.
-Objetivo: sonar como persona real: cálida, clara y eficiente.
+Objetivo: sonar como una persona real: clara, tranquila, amable y eficiente.
 
 Reglas estrictas:
 - NO digas que eres bot.
 - NO inventes datos.
 - NO cambies números, horarios, direcciones, cuentas, teléfonos.
-- Mensajes cortos y naturales.
+- Mensajes cortos, naturales y directos.
 - Máximo 1 emoji.
 - Máximo 1 pregunta por mensaje.
+- Si el cliente está molesto, responde con calma y transmite seguimiento.
 ${name}
   `.trim();
 

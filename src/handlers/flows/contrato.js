@@ -8,7 +8,7 @@ const {
 
 const { createContract } = require("../../services/contractsService");
 const { notifyAdmin, buildNewContractAdminMsg } = require("../../services/notifyService");
-const { parsePhoneE164 } = require("../../services/llmService");
+const { parsePhoneE164, extractColoniaHint } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
 const { storeToR2 } = require("../../services/r2UploadService");
 const { pickInboundMedia } = require("../../utils/inboundMedia");
@@ -28,20 +28,17 @@ if (USE_TEMPLATES) {
 // =====================
 function intro() {
   if (templates && pick) return pick(templates.contrato_intro, "seed")();
-  return (
-    "Perfecto 🙌 Para revisar cobertura, dime tu *colonia*.\n" +
-    "Ejemplo: “Centro”."
-  );
+  return "Perfecto. Para revisar cobertura necesito tu *colonia*.";
 }
 
 function askColonia() {
   if (templates && pick) return pick(templates.ask_colonia_more_detail, "seed")();
-  return "¿Me dices tu *colonia*? (Ej: Centro, Las Américas, Morelos)";
+  return "Compárteme tu *colonia* para revisar cobertura.";
 }
 
 function confirmColonia(col) {
   if (templates && pick) return pick(templates.confirm_colonia, "seed")(col);
-  return `¿Te refieres a la colonia *${col}*? Responde *sí* o *no* 🙂`;
+  return `¿Te refieres a la colonia *${col}*? Responde *sí* o *no*.`;
 }
 
 function looksLikeYes(t) {
@@ -49,6 +46,22 @@ function looksLikeYes(t) {
 }
 function looksLikeNo(t) {
   return /(no|nel|incorrecto|equivocado|error)/i.test(String(t || "").trim());
+}
+
+function looksLikeContractIntent(text) {
+  return /(contrat|quiero internet|nuevo servicio|instal|cobertura)/i.test(String(text || "").trim());
+}
+
+function pickColoniaInput(text, guess) {
+  const raw = String(text || "").trim();
+  if (guess) return String(guess).trim();
+
+  if (raw.includes(",")) {
+    const first = raw.split(",")[0];
+    if (first) return String(first).trim();
+  }
+
+  return raw;
 }
 
 // Copy: tips para foto (profesional, sin sonar “regaño”)
@@ -66,7 +79,15 @@ function inePhotoTips(sideLabel) {
 // =====================
 // Flow
 // =====================
-async function handle({ session, inbound, send, updateSession, closeSession, dbClient }) {
+async function handle({
+  session,
+  inbound,
+  send,
+  updateSession,
+  closeSession,
+  dbClient,
+  notifyAdmin: notifyAdminFn,
+}) {
   const step = Number(session.step || 1);
   const data = session.data || {};
   const phoneE164 = session.phone_e164 || inbound.phoneE164;
@@ -81,13 +102,30 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
       return;
     }
 
-    const coloniaRaw = txt;
+    if (looksLikeContractIntent(txt) && !/\d/.test(txt)) {
+      await send("Con gusto. Para revisar cobertura necesito que me compartas tu *colonia*.");
+      return;
+    }
+
+    let coloniaGuess = "";
+    if (/[,\d]/.test(txt) || txt.split(" ").length >= 4) {
+      try {
+        const hint = await extractColoniaHint(txt);
+        coloniaGuess = String(hint?.colonia_norm_guess || "").trim();
+      } catch {}
+    }
+
+    const coloniaRaw = pickColoniaInput(txt, coloniaGuess);
 
     // Resolver colonia contra DB
     const res = await resolveColonia(coloniaRaw, { limit: 5 });
 
     if (!res?.ok) {
-      await send(askColonia());
+      await send(
+        /[,\d]/.test(txt)
+          ? "Para ubicar bien la cobertura, primero necesito que me compartas solo la *colonia*."
+          : askColonia()
+      );
       return;
     }
 
@@ -103,7 +141,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
       await updateSession({ step: 11, data: nextData });
       await send(
         `Perfecto ✅ Colonia *${nextData.colonia}*.\n` +
-          "Ahora dime tu *calle y número* (Ej: Hidalgo 311)."
+          "Ahora compárteme tu *calle y número*."
       );
       return;
     }
@@ -133,7 +171,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
 
       await send(
         `Listo ✅ Colonia *${colonia}*.\n` +
-          "Ahora dime tu *calle y número* (Ej: Hidalgo 311)."
+          "Ahora compárteme tu *calle y número*."
       );
       return;
     }
@@ -144,11 +182,11 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
         step: 1,
         data: { ...data, colonia_guess: null, colonia_candidates: null },
       });
-      await send("Va 🙂 dime tu *colonia* (Ej: Centro, Las Américas, Morelos).");
+      await send("De acuerdo. Compárteme tu *colonia* para revisarla de nuevo.");
       return;
     }
 
-    await send("¿Me confirmas con *sí* o *no*? 🙂");
+    await send("Por favor confírmame con *sí* o *no*.");
     return;
   }
 
@@ -157,13 +195,13 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
   // =====================
   if (step === 11) {
     if (!/\d/.test(txt) || txt.length < 4) {
-      await send("¿Me lo mandas como *calle y número*? Ej: “Hidalgo 311” 🙂");
+      await send("Compárteme la *calle y número* del domicilio.");
       return;
     }
 
     const nextData = { ...data, calle_numero: txt };
     await updateSession({ step: 2, data: nextData });
-    await send("Excelente ✅ ¿Cuál es tu *nombre completo*?");
+    await send("Gracias. Ahora compárteme tu *nombre completo*.");
     return;
   }
 
@@ -172,12 +210,12 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
   // =====================
   if (step === 2) {
     if (!hasMinLen(txt, 3)) {
-      await send("¿Me compartes tu *nombre completo*, por favor?");
+      await send("Necesito tu *nombre completo* para continuar.");
       return;
     }
 
     await updateSession({ step: 3, data: { ...data, nombre: txt } });
-    await send("Perfecto. ¿Qué *teléfono* dejamos de contacto? (10 dígitos o escribe *mismo*)");
+    await send("Perfecto. ¿Qué *teléfono de contacto* dejamos? Puedes escribir *mismo* si quieres usar este número.");
     return;
   }
 
@@ -200,13 +238,13 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
     }
 
     if (!tel) {
-      await send("Ponme un teléfono de *10 dígitos* (ej. 4491234567) o escribe *mismo* 🙂");
+      await send("Compárteme un teléfono de *10 dígitos* o escribe *mismo*.");
       return;
     }
 
     await updateSession({ step: 4, data: { ...data, telefono_contacto: tel } });
     await send(
-      "Listo ✅ Ahora envíame foto de tu *INE (frente)* 📸\n\n" +
+      "Gracias. Ahora envíame la foto de tu *INE por el frente*.\n\n" +
         inePhotoTips("frente")
     );
     return;
@@ -218,7 +256,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
   if (step === 4) {
     if (!hasMediaUrls(inbound.media)) {
       await send(
-        "Necesito la *foto del frente* de la INE 📸 (envíala como imagen, porfa)\n\n" +
+        "Necesito la *foto del frente* de tu INE.\n\n" +
           inePhotoTips("frente")
       );
       return;
@@ -227,9 +265,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
     const m = pickInboundMedia(inbound.media);
 
     if (!m.url) {
-      await send(
-        "No pude leer la imagen 😅 ¿Me la reenvías como *foto*?\n\n" + inePhotoTips("frente")
-      );
+      await send("No pude leer la imagen. Reenvíamela como *foto*, por favor.\n\n" + inePhotoTips("frente"));
       return;
     }
 
@@ -241,7 +277,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
         mimetype: m.mimetype,
       });
       await send(
-        "No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.\n\n" +
+        "No pude procesar esa imagen. Reenvíala como *foto*, por favor.\n\n" +
           inePhotoTips("frente")
       );
       return;
@@ -261,7 +297,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
     } catch (e) {
       logger.error("[CONTRATO][INE_FRENTE] storeToR2 failed", e?.message || e);
       await send(
-        "Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?\n\n" +
+        "Tuve un problema guardando la imagen. Reenvíamela, por favor.\n\n" +
           inePhotoTips("frente")
       );
       return;
@@ -280,7 +316,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
     });
 
     await send(
-      "Gracias ✅ Ahora envíame la foto de tu *INE (atrás)* 📸\n\n" +
+      "Gracias. Ahora envíame la foto de tu *INE por atrás*.\n\n" +
         inePhotoTips("atrás")
     );
     return;
@@ -292,7 +328,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
   if (step === 5) {
     if (!hasMediaUrls(inbound.media)) {
       await send(
-        "Necesito la *foto de atrás* de la INE 📸 (envíala como imagen, porfa)\n\n" +
+        "Necesito la *foto por atrás* de tu INE.\n\n" +
           inePhotoTips("atrás")
       );
       return;
@@ -301,9 +337,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
     const m = pickInboundMedia(inbound.media);
 
     if (!m.url) {
-      await send(
-        "No pude leer la imagen 😅 ¿Me la reenvías como *foto*?\n\n" + inePhotoTips("atrás")
-      );
+      await send("No pude leer la imagen. Reenvíamela como *foto*, por favor.\n\n" + inePhotoTips("atrás"));
       return;
     }
 
@@ -314,7 +348,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
         mimetype: m.mimetype,
       });
       await send(
-        "No pude procesar esa imagen 😅 Reenvíala como *foto* por favor.\n\n" +
+        "No pude procesar esa imagen. Reenvíala como *foto*, por favor.\n\n" +
           inePhotoTips("atrás")
       );
       return;
@@ -328,8 +362,8 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
 
     if (sameId || sameUrl) {
       await send(
-        "Me llegó la misma imagen que la del *frente* 😅\n" +
-          "¿Me reenvías la foto de la INE *por atrás*? 📸\n\n" +
+        "Me llegó la misma imagen que la del *frente*.\n" +
+          "Reenvíame la foto de la INE *por atrás*, por favor.\n\n" +
           inePhotoTips("atrás")
       );
       return;
@@ -349,7 +383,7 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
     } catch (e) {
       logger.error("[CONTRATO][INE_REVERSO] storeToR2 failed", e?.message || e);
       await send(
-        "Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?\n\n" +
+        "Tuve un problema guardando la imagen. Reenvíamela, por favor.\n\n" +
           inePhotoTips("atrás")
       );
       return;
@@ -384,20 +418,20 @@ async function handle({ session, inbound, send, updateSession, closeSession, dbC
       dbClient
     );
 
-    await notifyAdmin(buildNewContractAdminMsg(c));
+    await (notifyAdminFn || notifyAdmin)(buildNewContractAdminMsg(c));
     await closeSession(session.session_id);
 
     await send(
-      `Listo ✅ Ya quedó tu solicitud.\n` +
+      `Listo. Ya quedó registrada tu solicitud.\n` +
         `Folio: *${c.folio}*\n\n` +
-        "En breve te contactamos para confirmar la instalación 🙌"
+        "En breve nos comunicaremos contigo para continuar con la instalación."
     );
     return;
   }
 
   // fallback
   await closeSession(session.session_id);
-  await send("Listo ✅ Si necesitas algo más, aquí estoy.");
+  await send("Listo. Si necesitas algo más, aquí estoy.");
 }
 
 module.exports = { intro, handle };

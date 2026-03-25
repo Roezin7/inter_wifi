@@ -1,6 +1,11 @@
 // src/handlers/inbound.js
 const { pool } = require("../db");
 const { routeIntent, polishReply } = require("../services/llmService");
+const {
+  answerKnowledgeQuestion,
+  canonicalIntent,
+  getKnowledgeByTopic,
+} = require("../services/faqService");
 const { insertWaMessage } = require("../services/messagesService");
 const {
   getOpenSessionByPhone,
@@ -17,6 +22,8 @@ const contrato = require("./flows/contrato");
 const pago = require("./flows/pago");
 const falla = require("./flows/falla");
 const faq = require("./flows/faq");
+const cambioDomicilio = require("./flows/cambioDomicilio");
+const cambioContrasena = require("./flows/cambioContrasena");
 
 // =====================
 // Config
@@ -27,31 +34,36 @@ const LLM_CONFIDENCE_MIN = Number(process.env.LLM_INTENT_MIN_CONF || 0.7);
 // =====================
 // Copy / UI
 // =====================
+function getFlowLabel(flow) {
+  const value = String(flow || "").toUpperCase();
+
+  if (value === "CONTRATO") return "contratación";
+  if (value === "PAGO") return "registro de pago";
+  if (value === "FALLA") return "reporte de falla";
+  if (value === "CAMBIO_DOMICILIO") return "cambio de domicilio";
+  if (value === "CAMBIO_CONTRASENA") return "cambio de contraseña";
+  return "información";
+}
+
 function menu(profileName) {
   const name = profileName ? ` ${profileName}` : "";
   return (
     `¡Hola${name}! 👋\n` +
     `Soy del equipo de InterWIFI.\n\n` +
     `¿En qué te ayudo hoy?\n` +
-    `1) Contratar internet\n` +
-    `2) Reportar una falla\n` +
-    `3) Registrar un pago\n` +
-    `4) Info (horarios, ubicación, formas de pago)\n\n` +
-    `Responde con *1, 2, 3, 4* o escribe tu necesidad 🙂\n\n` +
+    `1. Contratar internet\n` +
+    `2. Reportar una falla\n` +
+    `3. Registrar un pago\n` +
+    `4. Información\n` +
+    `5. Cambio de domicilio\n` +
+    `6. Cambiar contraseña\n\n` +
+    `Responde con *1, 2, 3, 4, 5 o 6* o escribe lo que necesitas.\n\n` +
     `Comandos: *menú*, *inicio*, *cancelar*, *agente*`
   );
 }
 
 function greetingWithSession(existing) {
-  const flow = String(existing?.flow || "").toUpperCase();
-  const label =
-    flow === "CONTRATO"
-      ? "contratación"
-      : flow === "PAGO"
-      ? "registro de pago"
-      : flow === "FALLA"
-      ? "reporte de falla"
-      : "información";
+  const label = getFlowLabel(existing?.flow);
 
   return (
     `¡Hola! 👋\n` +
@@ -97,7 +109,7 @@ function isGreetingOnly(text) {
   if (!t) return false;
 
   const hasBusiness =
-    /(contrat|internet|cobertura|pago|pagos|falla|deposit|transfer|plan|paquete|horario|direccion|ubic|ubicacion|precio)/i.test(
+    /(contrat|internet|cobertura|pago|pagos|falla|deposit|transfer|plan|paquete|horario|direccion|ubic|ubicacion|precio|domicilio|mudanza|contrasena|contraseña|clave)/i.test(
       t
     );
   if (hasBusiness) return false;
@@ -128,13 +140,25 @@ function isContinueWord(text) {
   );
 }
 
-// Menú principal: 1-4
+function looksLikeAffirmative(text) {
+  return /\b(si|sí|claro|ok|vale|va|dale|adelante|continuar|continua|continúe|seguimos|correcto|asi es|así es)\b/i.test(
+    norm(text)
+  );
+}
+
+function looksLikeNegative(text) {
+  return /\b(no|mejor no|negativo)\b/i.test(norm(text));
+}
+
+// Menú principal: 1-6
 function parseMainMenuChoice(text) {
   const t = norm(text);
   if (t === "1") return "CONTRATO";
   if (t === "2") return "FALLA";
   if (t === "3") return "PAGO";
   if (t === "4") return "FAQ";
+  if (t === "5") return "CAMBIO_DOMICILIO";
+  if (t === "6") return "CAMBIO_CONTRASENA";
   return null;
 }
 
@@ -145,6 +169,22 @@ function parseMainMenuChoice(text) {
  */
 function mapIntentFast(text) {
   const t = norm(text);
+
+  if (
+    /(no han atendido|no me han atendido|no han resuelto|no me han resuelto|no se ha resuelto|no se resolvio|no se resolvió|mi reporte sigue|seguimiento de reporte|estado del reporte|estatus del reporte|aun no vienen|todavia no vienen|todavía no vienen|siguen sin ir|siguen sin atender)/i.test(
+      t
+    )
+  ) {
+    return "FAQ";
+  }
+
+  if (/(cambio de domicilio|cambiar domicilio|me cambie de domicilio|me cambié de domicilio|me mude|me mudé|nuevo domicilio|cambio de casa)/i.test(t)) {
+    return "CAMBIO_DOMICILIO";
+  }
+
+  if (/(cambiar contrasena|cambiar contraseña|cambio de contrasena|cambio de contraseña|cambiar la clave|cambiar clave wifi|cambiar clave de wifi|cambiar password wifi)/i.test(t)) {
+    return "CAMBIO_CONTRASENA";
+  }
 
   // FAQ win
   if (
@@ -180,12 +220,50 @@ function mapIntentFast(text) {
   return null;
 }
 
-// ✅ “FAQ override” aunque haya sesión (si el usuario pide INFO en medio de otro flow)
-function shouldForceFaqSwitch(text) {
-  const t = norm(text);
-  return /(formas de pago|forma de pago|como pagar|cómo pagar|metodos de pago|métodos de pago|transferencia|deposito|depósito|cuenta|clabe|tarjeta|oxxo|banco|beneficiario|horario|horarios|ubicacion|ubicación|direccion|dirección|precio|precios|paquete|paquetes|plan|planes|informacion|información|info)/i.test(
-    t
+function getSwitchableFlowIntent(text, currentFlow) {
+  const intent = mapIntentFast(text);
+  const flow = String(currentFlow || "").toUpperCase();
+
+  if (!intent || intent === "FAQ" || intent === flow) return null;
+  return intent;
+}
+
+function buildResumeHint(flow) {
+  const label = getFlowLabel(flow);
+  return (
+    `\n\nSi quieres, seguimos con tu proceso de *${label}*.` +
+    ` Puedes escribir *continuar* o enviarme el dato pendiente.`
   );
+}
+
+function isFaqChoice(text) {
+  return /^(1|2|3|4)$/.test(norm(text));
+}
+
+function parseFaqTopicChoice(text) {
+  const t = norm(text);
+  if (t === "1") return "horarios";
+  if (t === "2") return "ubicacion";
+  if (t === "3") return "pagos";
+  if (t === "4") return "precios";
+  return null;
+}
+
+async function resolveFaqReply(text) {
+  const topic = parseFaqTopicChoice(text);
+  if (topic) {
+    const entry = await getKnowledgeByTopic(topic);
+    if (entry?.answer) return entry.answer;
+  }
+
+  const canon = canonicalIntent(text);
+  if (canon) {
+    const entry = await getKnowledgeByTopic(canon);
+    if (entry?.answer) return entry.answer;
+  }
+
+  const answer = await answerKnowledgeQuestion(text);
+  return answer?.answer || null;
 }
 
 // ✅ Si estás dentro de FAQ y el usuario ahora quiere una acción (contrato/pago/falla), salimos de FAQ
@@ -194,6 +272,8 @@ function shouldExitFaqToFlow(text) {
   if (intent === "CONTRATO") return "CONTRATO";
   if (intent === "PAGO") return "PAGO";
   if (intent === "FALLA") return "FALLA";
+  if (intent === "CAMBIO_DOMICILIO") return "CAMBIO_DOMICILIO";
+  if (intent === "CAMBIO_CONTRASENA") return "CAMBIO_CONTRASENA";
   return null;
 }
 
@@ -201,6 +281,8 @@ function getIntro(flow, inbound) {
   if (flow === "CONTRATO") return contrato.intro(inbound.phoneE164);
   if (flow === "PAGO") return pago.intro();
   if (flow === "FALLA") return falla.intro();
+  if (flow === "CAMBIO_DOMICILIO") return cambioDomicilio.intro();
+  if (flow === "CAMBIO_CONTRASENA") return cambioContrasena.intro();
   return faq.intro();
 }
 
@@ -418,6 +500,7 @@ async function handleInbound({ inbound, send }) {
   }
 
   const client = await pool.connect();
+  let committed = false;
   try {
     await client.query("BEGIN");
 
@@ -524,6 +607,42 @@ async function handleInbound({ inbound, send }) {
         flow = routed.intent;
       }
 
+      if (flow === "FAQ") {
+        const knowledge = await resolveFaqReply(inboundText);
+
+        if (knowledge) {
+          await client.query("COMMIT");
+          await sendAndLog({
+            sessionId: null,
+            flow: "FAQ",
+            step: 0,
+            kind: "knowledge_no_session",
+            out: knowledge,
+          });
+          return;
+        }
+
+        const session = await createSession(
+          {
+            phoneE164: inbound.phoneE164,
+            flow: "FAQ",
+            step: 1,
+            data: { menu_mode: false, faq_entered: true },
+          },
+          client
+        );
+
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: session.session_id,
+          flow: "FAQ",
+          step: 1,
+          kind: "faq_menu_no_session",
+          out: faq.intro(),
+        });
+        return;
+      }
+
       const session = await createSession(
         { phoneE164: inbound.phoneE164, flow, step: 1, data: { menu_mode: false } },
         client
@@ -545,6 +664,8 @@ async function handleInbound({ inbound, send }) {
     // =====================
     const existingFlow = String(existing.flow || "").toUpperCase();
     const menuMode = Boolean(existing?.data?.menu_mode);
+    const resumePrompt = Boolean(existing?.data?.resume_prompt);
+    const inlineFaqMode = Boolean(existing?.data?.inline_faq_mode);
     const isFaqSession = existingFlow === "FAQ";
 
     // cancel
@@ -629,15 +750,7 @@ async function handleInbound({ inbound, send }) {
         },
         client
       );
-
-      const label =
-        existingFlow === "CONTRATO"
-          ? "contratación"
-          : existingFlow === "PAGO"
-          ? "registro de pago"
-          : existingFlow === "FALLA"
-          ? "reporte de falla"
-          : "información";
+      const label = getFlowLabel(existingFlow);
 
       await client.query("COMMIT");
       await sendAndLog({
@@ -655,6 +768,15 @@ async function handleInbound({ inbound, send }) {
 
     // saludo con sesión: no avances
     if (isGreetingOnly(inboundText)) {
+      await updateSession(
+        {
+          sessionId: existing.session_id,
+          step: existing.step,
+          data: { ...(existing.data || {}), resume_prompt: true },
+        },
+        client
+      );
+
       await client.query("COMMIT");
       await sendAndLog({
         sessionId: existing.session_id,
@@ -667,13 +789,21 @@ async function handleInbound({ inbound, send }) {
     }
 
     // ✅ “continuar”: limpia menu_mode y NO lo pases al flow
-    if (isContinueWord(inboundText)) {
-      if (menuMode) {
+    if (
+      isContinueWord(inboundText) ||
+      ((menuMode || resumePrompt) && looksLikeAffirmative(inboundText))
+    ) {
+      if (menuMode || resumePrompt) {
         await updateSession(
           {
             sessionId: existing.session_id,
             step: existing.step,
-            data: { ...(existing.data || {}), menu_mode: false },
+            data: {
+              ...(existing.data || {}),
+              menu_mode: false,
+              resume_prompt: false,
+              inline_faq_mode: false,
+            },
           },
           client
         );
@@ -685,44 +815,167 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: "continue_session",
-        out: "Listo ✅",
+        out: "Perfecto. Seguimos con tu proceso. Puedes enviarme el dato pendiente cuando quieras.",
       });
       return;
     }
 
-    // ✅ Si el usuario pide INFO en medio de otro flow: switch a FAQ
-    if (!isFaqSession && shouldForceFaqSwitch(inboundText)) {
-      await closeSession(existing.session_id, client, "switch_to_faq");
-      const newSession = await createSession(
-        { phoneE164: inbound.phoneE164, flow: "FAQ", step: 1, data: { menu_mode: false } },
+    if (resumePrompt && looksLikeNegative(inboundText)) {
+      await updateSession(
+        {
+          sessionId: existing.session_id,
+          step: existing.step,
+          data: { ...(existing.data || {}), resume_prompt: false, menu_mode: true },
+        },
         client
       );
+
       await client.query("COMMIT");
       await sendAndLog({
-        sessionId: newSession.session_id,
-        flow: "FAQ",
-        step: 1,
-        kind: "switch_flow_to_faq_by_text",
-        out: getIntro("FAQ", inbound),
+        sessionId: existing.session_id,
+        flow: existing.flow,
+        step: existing.step,
+        kind: "resume_prompt_to_menu",
+        out:
+          `📌 Tienes un proceso abierto de *${getFlowLabel(existing.flow)}*.\n` +
+          `Si quieres retomarlo después, aquí seguirá disponible.\n\n` +
+          menu(inbound.profileName),
       });
       return;
     }
 
-    // ===== números 1-4 =====
-    if (mainChoice) {
-      if (isFaqSession) {
-        // FAQ interpreta 1-4 internamente (horarios/ubicación/pagos/precios)
+    if (!isFaqSession) {
+      const nextFlow = getSwitchableFlowIntent(inboundText, existingFlow);
+      if (nextFlow) {
+        await closeSession(existing.session_id, client, "switch_flow_by_text");
+        const newSession = await createSession(
+          { phoneE164: inbound.phoneE164, flow: nextFlow, step: 1, data: { menu_mode: false } },
+          client
+        );
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: newSession.session_id,
+          flow: nextFlow,
+          step: 1,
+          kind: "switch_flow_by_text",
+          out: getIntro(nextFlow, inbound),
+        });
+        return;
+      }
+    }
+
+    if (!isFaqSession && inlineFaqMode) {
+      const inlineFaqReply = await resolveFaqReply(inboundText);
+
+      if (inlineFaqReply || isFaqChoice(inboundText) || mapIntentFast(inboundText) === "FAQ") {
         await updateSession(
           {
             sessionId: existing.session_id,
             step: existing.step,
-            data: { ...(existing.data || {}), menu_mode: false },
+            data: {
+              ...(existing.data || {}),
+              inline_faq_mode: true,
+              menu_mode: false,
+              resume_prompt: false,
+            },
           },
           client
         );
-        // no return: cae a dispatch FAQ
-      } else if (menuMode) {
-        // Switch solo si el usuario pidió menú antes
+
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: existing.session_id,
+          flow: existing.flow,
+          step: existing.step,
+          kind: inlineFaqReply ? "knowledge_inline_followup" : "faq_menu_inline_followup",
+          out: (inlineFaqReply || faq.intro()) + buildResumeHint(existing.flow),
+        });
+        return;
+      }
+    }
+
+    if (!isFaqSession && mapIntentFast(inboundText) === "FAQ") {
+      const knowledge = await resolveFaqReply(inboundText);
+
+      await updateSession(
+        {
+          sessionId: existing.session_id,
+          step: existing.step,
+          data: {
+            ...(existing.data || {}),
+            inline_faq_mode: true,
+            menu_mode: false,
+            resume_prompt: false,
+          },
+        },
+        client
+      );
+
+      await client.query("COMMIT");
+      await sendAndLog({
+        sessionId: existing.session_id,
+        flow: existing.flow,
+        step: existing.step,
+        kind: knowledge ? "knowledge_in_flow" : "faq_menu_in_flow",
+        out: (knowledge || faq.intro()) + buildResumeHint(existing.flow),
+      });
+      return;
+    }
+
+    // ===== números 1-6 =====
+    if (mainChoice) {
+      if (isFaqSession) {
+        if (isFaqChoice(inboundText)) {
+          await updateSession(
+            {
+              sessionId: existing.session_id,
+              step: existing.step,
+              data: { ...(existing.data || {}), menu_mode: false },
+            },
+            client
+          );
+          // no return: cae a dispatch FAQ
+        } else {
+          await closeSession(existing.session_id, client, "switch_flow_by_number");
+          const newSession = await createSession(
+            { phoneE164: inbound.phoneE164, flow: mainChoice, step: 1, data: { menu_mode: false } },
+            client
+          );
+          await client.query("COMMIT");
+          await sendAndLog({
+            sessionId: newSession.session_id,
+            flow: mainChoice,
+            step: 1,
+            kind: "faq_switch_flow_by_number",
+            out: getIntro(mainChoice, inbound),
+          });
+          return;
+        }
+      } else if (mainChoice === "FAQ") {
+        await updateSession(
+          {
+            sessionId: existing.session_id,
+            step: existing.step,
+            data: {
+              ...(existing.data || {}),
+              inline_faq_mode: true,
+              menu_mode: false,
+              resume_prompt: false,
+            },
+          },
+          client
+        );
+
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: existing.session_id,
+          flow: existing.flow,
+          step: existing.step,
+          kind: "faq_menu_by_number_in_flow",
+          out: faq.intro() + buildResumeHint(existing.flow),
+        });
+        return;
+      } else if (mainChoice !== existingFlow) {
         await closeSession(existing.session_id, client, "switch_flow");
         const newSession = await createSession(
           { phoneE164: inbound.phoneE164, flow: mainChoice, step: 1, data: { menu_mode: false } },
@@ -737,8 +990,17 @@ async function handleInbound({ inbound, send }) {
           out: getIntro(mainChoice, inbound),
         });
         return;
+      } else {
+        await client.query("COMMIT");
+        await sendAndLog({
+          sessionId: existing.session_id,
+          flow: existing.flow,
+          step: existing.step,
+          kind: "same_flow_by_number",
+          out: `Seguimos con tu proceso de *${getFlowLabel(existing.flow)}*. Puedes enviarme el dato pendiente cuando quieras.`,
+        });
+        return;
       }
-      // Si NO hay menu_mode => NO cambies flow
     }
 
     // si llega texto real, apaga menu_mode (para que no quede pegado)
@@ -747,7 +1009,25 @@ async function handleInbound({ inbound, send }) {
         {
           sessionId: existing.session_id,
           step: existing.step,
-          data: { ...(existing.data || {}), menu_mode: false },
+          data: {
+            ...(existing.data || {}),
+            menu_mode: false,
+            resume_prompt: false,
+            inline_faq_mode: false,
+          },
+        },
+        client
+      );
+    } else if (resumePrompt || inlineFaqMode) {
+      await updateSession(
+        {
+          sessionId: existing.session_id,
+          step: existing.step,
+          data: {
+            ...(existing.data || {}),
+            resume_prompt: false,
+            inline_faq_mode: false,
+          },
         },
         client
       );
@@ -769,8 +1049,12 @@ async function handleInbound({ inbound, send }) {
       return;
     }
 
-    // ✅ PREMIUM BOT CTX: one send() that supports both text & media,
-    // plus explicit sendImage() for flows (backwards compatible)
+    const outbox = [];
+    const adminOutbox = [];
+    const runtime = { flow: locked.flow, step: Number(locked.step || 1) };
+
+    // ✅ PREMIUM BOT CTX: queue outbound messages and flush only after COMMIT.
+    // Esto evita respuestas enviadas si luego falla la transacción.
     const ctx = {
       session: locked,
       inbound,
@@ -786,10 +1070,10 @@ async function handleInbound({ inbound, send }) {
             ? "flow_reply_document"
             : "flow_reply_text";
 
-        await sendAndLog({
+        outbox.push({
           sessionId: locked.session_id,
-          flow: locked.flow,
-          step: locked.step,
+          flow: runtime.flow,
+          step: runtime.step,
           kind: k,
           out,
         });
@@ -797,17 +1081,25 @@ async function handleInbound({ inbound, send }) {
 
       // Explicit helper used by falla.js (and any future flows)
       sendImage: async (url, caption = "") => {
-        await sendAndLog({
+        outbox.push({
           sessionId: locked.session_id,
-          flow: locked.flow,
-          step: locked.step,
+          flow: runtime.flow,
+          step: runtime.step,
           kind: "flow_reply_image",
           out: { type: "image", url, caption },
         });
       },
 
-      updateSession: async ({ step, data }) =>
-        updateSession({ sessionId: locked.session_id, step, data }, client),
+      updateSession: async ({ step, data }) => {
+        const updated = await updateSession({ sessionId: locked.session_id, step, data }, client);
+        runtime.step = Number(step || runtime.step);
+        return updated;
+      },
+
+      notifyAdmin: async (text) => {
+        const msg = String(text || "").trim();
+        if (msg) adminOutbox.push(msg);
+      },
 
       closeSession: async () => closeSession(locked.session_id, client, "flow_done"),
     };
@@ -823,13 +1115,49 @@ async function handleInbound({ inbound, send }) {
     if (locked.flow === "CONTRATO") await contrato.handle(ctx);
     else if (locked.flow === "PAGO") await pago.handle(ctx);
     else if (locked.flow === "FALLA") await falla.handle(ctx);
+    else if (locked.flow === "CAMBIO_DOMICILIO") await cambioDomicilio.handle(ctx);
+    else if (locked.flow === "CAMBIO_CONTRASENA") await cambioContrasena.handle(ctx);
     else await faq.handle(ctx);
 
     await client.query("COMMIT");
+    committed = true;
+
+    for (const item of outbox) {
+      try {
+        await sendAndLog(item);
+      } catch (sendErr) {
+        logEvent({
+          event: "post_commit_send_failed",
+          intent: item.flow,
+          step: item.step,
+          kind: item.kind,
+          error: String(sendErr?.message || sendErr),
+          phone: maskPhone(inbound.phoneE164),
+          provider_msg_id: providerMsgId || null,
+        });
+      }
+    }
+
+    for (const adminMsg of adminOutbox) {
+      try {
+        await notifyAdmin(adminMsg);
+      } catch (notifyErr) {
+        logEvent({
+          event: "post_commit_admin_notify_failed",
+          intent: runtime.flow,
+          step: runtime.step,
+          error: String(notifyErr?.message || notifyErr),
+          phone: maskPhone(inbound.phoneE164),
+          provider_msg_id: providerMsgId || null,
+        });
+      }
+    }
   } catch (e) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {}
+    if (!committed) {
+      try {
+        await client.query("ROLLBACK");
+      } catch {}
+    }
 
     logEvent({
       event: "webhook_error",

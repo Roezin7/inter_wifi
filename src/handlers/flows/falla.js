@@ -5,10 +5,10 @@ const { notifyAdmin } = require("../../services/notifyService");
 
 function intro() {
   return (
-    "Claro, te apoyo con la falla ✅\n\n" +
+    "Claro, te apoyo con la falla.\n\n" +
     "Tu servicio está:\n" +
-    "A) *Sin internet*\n" +
-    "B) *Lento / intermitente*\n\n" +
+    "A. *Sin internet*\n" +
+    "B. *Lento o intermitente*\n\n" +
     "Responde *A* o *B*."
   );
 }
@@ -22,11 +22,15 @@ function norm(s) {
 }
 
 function isYes(t) {
-  return /^(si|sí|s|ok|va|listo|correcto|afirmativo)$/i.test(norm(t));
+  return /\b(si|sí|s|ok|va|listo|correcto|afirmativo|ya|hecho|ya quedo|ya quedó|ya lo hice|ya lo revise|ya lo revisé|ya lo intente|ya lo intenté)\b/i.test(
+    norm(t)
+  );
 }
 
 function isNo(t) {
-  return /^(no|n|nel|negativo)$/i.test(norm(t));
+  return /\b(no|n|nel|negativo|aun no|aún no|todavia no|todavía no|sigue igual|no quedo|no quedó)\b/i.test(
+    norm(t)
+  );
 }
 
 function pickAB(t) {
@@ -47,12 +51,21 @@ function buildFolioMsg(folio) {
   return (
     `✅ *Reporte generado*\n` +
     `Folio: *${folio}*\n\n` +
-    `Estamos trabajando para restablecer tu servicio en un lapso de *24 a 48 hrs*.\n` +
-    `Si te piden el folio, compártelo por aquí.`
+    `No hace falta levantar otro reporte por este mismo caso.\n` +
+    `Nos vamos a comunicar contigo conforme avance tu turno.`
   );
 }
 
-async function handle({ session, inbound, send, sendImage, updateSession, closeSession, dbClient }) {
+async function handle({
+  session,
+  inbound,
+  send,
+  sendImage,
+  updateSession,
+  closeSession,
+  dbClient,
+  notifyAdmin: notifyAdminFn,
+}) {
   const step = Number(session.step || 1);
 
   // OJO: siempre clona data para no mutar referencias inesperadas
@@ -111,7 +124,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
       await updateSession({ step: 3, data: { ...data, lights } });
       await send(
         "Eso normalmente indica un cable flojo o mal conectado.\n" +
-          "¿Ya desconectaste y reconectaste *cable por cable* hasta escuchar el “click”? (sí/no)"
+          "¿Ya desconectaste y reconectaste *cable por cable* hasta escuchar el clic? Responde *sí* o *no*."
       );
       return;
     }
@@ -122,7 +135,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
       "Perfecto.\n" +
         "Ahora desconecta de la luz *módem y router* por *3 minutos* ⏱️\n" +
         "Luego conéctalos y espera *2 minutos*.\n\n" +
-        "¿Se restableció el internet? (sí/no)"
+        "¿Se restableció el internet? Responde *sí* o *no*."
     );
     return;
   }
@@ -130,7 +143,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
   // STEP 3: confirmación cables
   if (step === 3) {
     if (isNo(txtRaw)) {
-      await send("Hazlo por favor y cuando termines responde *listo*.");
+      await send("Hazlo, por favor, y cuando termines responde *listo*.");
       return;
     }
     if (!isYes(txtRaw) && norm(txtRaw) !== "listo") {
@@ -143,7 +156,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
       "Gracias.\n" +
         "Ahora desconecta de la luz *módem y router* por *3 minutos* ⏱️\n" +
         "Luego conéctalos y espera *2 minutos*.\n\n" +
-        "¿Se restableció el internet? (sí/no)"
+        "¿Se restableció el internet? Responde *sí* o *no*."
     );
     return;
   }
@@ -152,7 +165,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
   if (step === 4) {
     if (isYes(txtRaw)) {
       await closeSession();
-      await send("Perfecto ✅ Si vuelve a fallar, escribe *falla* y te ayudo.");
+      await send("Perfecto. Me da gusto que ya haya quedado. Si vuelve a fallar, escríbeme y con gusto te apoyo.");
       return;
     }
     if (!isNo(txtRaw)) {
@@ -161,7 +174,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
     }
 
     await updateSession({ step: 5, data: { ...data, power_cycle_done: true } });
-    await send("¿Aparece el nombre de tu red WiFi en el celular/computadora? (sí/no)");
+    await send("¿Aparece el nombre de tu red WiFi en el celular o en la computadora? Responde *sí* o *no*.");
     return;
   }
 
@@ -173,14 +186,14 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
       return;
     }
     if (!isNo(txtRaw)) {
-      await send("Responde *sí* o *no* 🙂");
+      await send("Responde *sí* o *no*.");
       return;
     }
 
     await updateSession({ step: 6, data: { ...data, ssid_visible: false } });
     await send(
       "Revisa la *etiqueta detrás del módem*: ahí viene el nombre de la red (SSID) y la contraseña.\n" +
-        "¿Ya intentaste conectarte con esos datos? (sí/no)"
+        "¿Ya intentaste conectarte con esos datos? Responde *sí* o *no*."
     );
     return;
   }
@@ -188,7 +201,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
   // STEP 6: intentó etiqueta
   if (step === 6) {
     if (isNo(txtRaw)) {
-      await send("Inténtalo por favor y cuando termines responde *listo*.");
+      await send("Inténtalo, por favor, y cuando termines responde *listo*.");
       return;
     }
     if (!isYes(txtRaw) && norm(txtRaw) !== "listo") {
@@ -220,7 +233,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
     }
 
     if (!phoneE164) {
-      await send("Uy 😅 no pude identificar tu número. Escribe *agente* por favor.");
+      await send("No pude identificar tu número. Escribe *agente* y te apoyo con un asesor.");
       await closeSession();
       return;
     }
@@ -234,7 +247,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
       dbClient
     );
 
-    await notifyAdmin(
+    await (notifyAdminFn || notifyAdmin)(
       `🛠️ REPORTE DE FALLA ${r.folio}\n` +
         `Nombre: ${r.nombre}\n` +
         `Tel: ${phoneE164}\n` +
@@ -249,7 +262,7 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
   }
 
   await closeSession();
-  await send("Listo ✅ Si necesitas algo más, aquí estoy.");
+  await send("Listo. Si necesitas algo más, aquí estoy.");
 }
 
 module.exports = { intro, handle };

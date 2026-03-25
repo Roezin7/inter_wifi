@@ -15,15 +15,15 @@ const templates = {
   ],
 
   contrato_intro: [
-    () => `Perfecto 🙌 Para revisar cobertura, ¿me dices tu colonia y calle con número?\nEjemplo: “Centro, Hidalgo 311”.`,
-    () => `Va, te apoyo con la contratación. ¿En qué colonia estás y cuál es tu calle y número?`,
-    () => `Excelente. Primero confirmo cobertura: ¿me compartes colonia + calle + número?`,
+    () => `Perfecto. Para revisar cobertura, compárteme tu colonia.`,
+    () => `Va, te apoyo con la contratación. Primero necesito tu colonia.`,
+    () => `Excelente. Primero confirmo cobertura. Compárteme tu colonia.`,
   ],
 
   ask_colonia_more_detail: [
-    () => `Gracias. ¿Me dices la colonia también? Con colonia + calle + número lo reviso rápido.`,
-    () => `¿En qué colonia queda? Si me pones “colonia, calle y número” te confirmo cobertura en corto.`,
-    () => `Perfecto. Solo me falta la colonia 😊 ¿Cuál es?`,
+    () => `Gracias. Ahora compárteme la colonia para revisar cobertura.`,
+    () => `Necesito la colonia para poder confirmar cobertura.`,
+    () => `Perfecto. Solo me falta la colonia.`,
   ],
 
   confirm_colonia: [
