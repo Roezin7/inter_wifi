@@ -4,6 +4,7 @@ const {
   getKnowledgeByTopic,
   norm,
   canonicalIntent,
+  formatKnowledgeReply,
 } = require("../../services/faqService");
 const { pick } = require("../../utils/replies");
 
@@ -105,12 +106,30 @@ function wrapPro(rawAnswer, category) {
   return header + a;
 }
 
+function appendFooter(out, footer) {
+  if (!footer) return out;
+
+  if (Array.isArray(out)) {
+    const items = out.filter(Boolean);
+    if (!items.length) return footer.trim();
+    items[items.length - 1] = `${items[items.length - 1]}${footer}`;
+    return items;
+  }
+
+  return `${out}${footer}`;
+}
+
 async function sendTopicAnswer(topic, send, updateSession, data, seed = "") {
   const entry = await getKnowledgeByTopic(topic);
   if (!entry?.answer) return false;
 
   await updateSession({ step: 2, data: { ...data, faq_entered: true, last: topic } });
-  await send(wrapPro(entry.answer, entry.category) + footerShort(seed));
+  await send(
+    appendFooter(
+      formatKnowledgeReply({ ...entry, answer: wrapPro(entry.answer, entry.category) }),
+      footerShort(seed)
+    )
+  );
   return true;
 }
 
@@ -146,7 +165,12 @@ async function handle({ session, inbound, send, updateSession }) {
       step: 2,
       data: { ...data, faq_entered: true, last: answer.topic || answer.group_key || answer.id || null },
     });
-    await send(wrapPro(answer.answer, answer.category) + footerShort(`${seed}:answer`));
+    await send(
+      appendFooter(
+        formatKnowledgeReply({ ...answer, answer: wrapPro(answer.answer, answer.category) }),
+        footerShort(`${seed}:answer`)
+      )
+    );
     return;
   }
 

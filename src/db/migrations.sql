@@ -505,14 +505,12 @@ _Sin contrato forzoso • No necesitas línea telefónica_
 
 *Características:*
 • *Velocidad:* 10MB
-• Hasta 4 dispositivos
 • Navegación ilimitada
 
 *Requisitos:*
 • INE
 • Comprobante de domicilio
-
-📌 *Importante:* En comunidades aledañas el precio puede variar.$$,
+$$,
   'precios',
   ARRAY[
     'precio',

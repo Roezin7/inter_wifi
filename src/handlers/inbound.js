@@ -5,6 +5,7 @@ const {
   answerKnowledgeQuestion,
   canonicalIntent,
   getKnowledgeByTopic,
+  formatKnowledgeReply,
 } = require("../services/faqService");
 const { insertWaMessage } = require("../services/messagesService");
 const {
@@ -246,9 +247,12 @@ function mapIntentFast(text) {
   )
     return "PAGO";
 
+  // falla primero para que frases como "sin internet" no caigan en contratación
+  if (/(falla|sin internet|no tengo internet|no funciona|intermit|lento|se corta|sin servicio)/i.test(t))
+    return "FALLA";
+
   // contrato / cobertura
   if (/(cobertura|cubre|cobren|tienen cobertura|hay cobertura|contrat|internet|instal|instalacion|instalación|nuevo servicio)/i.test(t)) return "CONTRATO";
-  if (/(falla|sin internet|no funciona|intermit|lento)/i.test(t)) return "FALLA";
 
   // “pago(s)” solo => FAQ
   if (/^pago(s)?$/.test(t)) return "FAQ";
@@ -289,21 +293,35 @@ function parseFaqTopicChoice(text) {
   return null;
 }
 
+function appendReplyTail(reply, tail) {
+  const text = String(tail || "").trim();
+  if (!text) return reply;
+
+  if (Array.isArray(reply)) {
+    const items = reply.filter(Boolean);
+    if (!items.length) return text;
+    items[items.length - 1] = `${items[items.length - 1]}\n\n${text}`;
+    return items;
+  }
+
+  return `${reply}\n\n${text}`;
+}
+
 async function resolveFaqReply(text) {
   const topic = parseFaqTopicChoice(text);
   if (topic) {
     const entry = await getKnowledgeByTopic(topic);
-    if (entry?.answer) return entry.answer;
+    if (entry?.answer) return formatKnowledgeReply(entry);
   }
 
   const canon = canonicalIntent(text);
   if (canon) {
     const entry = await getKnowledgeByTopic(canon);
-    if (entry?.answer) return entry.answer;
+    if (entry?.answer) return formatKnowledgeReply(entry);
   }
 
   const answer = await answerKnowledgeQuestion(text);
-  return answer?.answer || null;
+  return answer?.answer ? formatKnowledgeReply(answer) : null;
 }
 
 // ✅ Si estás dentro de FAQ y el usuario ahora quiere una acción (contrato/pago/falla), salimos de FAQ
@@ -965,7 +983,10 @@ async function handleInbound({ inbound, send }) {
           step: existing.step,
           kind: inlineFaqReply ? "knowledge_inline_followup" : "faq_menu_inline_followup",
           out: inlineFaqReply
-            ? `${inlineFaqReply}\n\n${buildResumeHint(existing.flow, `${replySeed}:faq_inline_followup`)}`
+            ? appendReplyTail(
+                inlineFaqReply,
+                buildResumeHint(existing.flow, `${replySeed}:faq_inline_followup`)
+              )
             : [
                 ...faq.intro(`${replySeed}:faq_inline_followup`),
                 buildResumeHint(existing.flow, `${replySeed}:faq_inline_followup`),
@@ -999,7 +1020,7 @@ async function handleInbound({ inbound, send }) {
         step: existing.step,
         kind: knowledge ? "knowledge_in_flow" : "faq_menu_in_flow",
         out: knowledge
-          ? `${knowledge}\n\n${buildResumeHint(existing.flow, `${replySeed}:faq_in_flow`)}`
+          ? appendReplyTail(knowledge, buildResumeHint(existing.flow, `${replySeed}:faq_in_flow`))
           : [
               ...faq.intro(`${replySeed}:faq_in_flow`),
               buildResumeHint(existing.flow, `${replySeed}:faq_in_flow`),

@@ -160,7 +160,7 @@ function buildReceiptWhatsappAnswer() {
 function buildPlansAnswer() {
   return readEnv(
     "INTERWIFI_PLANS",
-    "💰 *Paquete de internet (Encarnación de Díaz)*\n_Sin contrato forzoso • No necesitas línea telefónica_\n\n*Instalación:* $1,600\n*Mensualidad:* $300\n\n*Incluye:*\n• Router inalámbrico\n• Primer mensualidad\n\n*Características:*\n• *Velocidad:* 10MB\n• Hasta 4 dispositivos\n• Navegación ilimitada\n\n*Requisitos:*\n• INE\n• Comprobante de domicilio\n\n📌 *Importante:* En comunidades aledañas el precio puede variar."
+    "💰 *Paquete de internet (Encarnación de Díaz)*\n_Sin contrato forzoso • No necesitas línea telefónica_\n\n*Instalación:* $1,600\n*Mensualidad:* $300\n\n*Incluye:*\n• Router inalámbrico\n• Primer mensualidad\n\n*Características:*\n• *Velocidad:* 10MB\n• Navegación ilimitada\n\n*Requisitos:*\n• INE\n• Comprobante de domicilio"
   );
 }
 
@@ -169,6 +169,48 @@ function buildReportFollowUpAnswer() {
     "INTERWIFI_REPORT_FOLLOWUP",
     "Entiendo la molestia. No hace falta levantar otro reporte por el mismo caso. En cuanto llegue tu turno, nos vamos a comunicar contigo para darte seguimiento."
   );
+}
+
+function normalizeAnswerLines(answer) {
+  return String(answer || "")
+    .replace(/\\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd());
+}
+
+function cleanupKnowledgeAnswer(answer) {
+  const lines = normalizeAnswerLines(answer).filter((line) => {
+    const clean = norm(line);
+    if (!clean) return true;
+    if (clean.includes("hasta 4 dispositivos")) return false;
+    if (clean.includes("comunidades aledanas el precio puede variar")) return false;
+    if (clean.includes("comunidades y rancherias el precio puede variar")) return false;
+    if (clean.includes("rancherias")) return false;
+    return true;
+  });
+
+  return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+function isPlansKnowledge(entry) {
+  return (
+    norm(entry?.category) === "precios" ||
+    norm(entry?.group_key) === "precios" ||
+    norm(entry?.topic) === "precios"
+  );
+}
+
+function formatKnowledgeReply(entry) {
+  if (!entry?.answer) return "";
+
+  const cleaned = cleanupKnowledgeAnswer(entry.answer);
+
+  if (!isPlansKnowledge(entry)) return cleaned;
+
+  return [
+    cleaned,
+    "📌 En comunidades y rancherías el precio puede variar.\nSi quieres, dime tu colonia y te confirmo el costo.",
+  ];
 }
 
 function faqIdentity(entry) {
@@ -603,4 +645,5 @@ module.exports = {
   canonicalIntent,
   getKnowledgeByTopic,
   answerKnowledgeQuestion,
+  formatKnowledgeReply,
 };
