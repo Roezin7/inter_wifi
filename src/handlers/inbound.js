@@ -17,6 +17,7 @@ const {
 } = require("../services/sessionsService");
 
 const { notifyAdmin } = require("../services/notifyService");
+const { pick } = require("../utils/replies");
 
 const contrato = require("./flows/contrato");
 const pago = require("./flows/pago");
@@ -45,28 +46,67 @@ function getFlowLabel(flow) {
   return "información";
 }
 
-function menu(profileName) {
+function pickText(options, seed, fallback = "") {
+  return String(pick(options, seed) || fallback || options[0] || "").trim();
+}
+
+function buildReplySeed(inbound, suffix = "") {
+  return [
+    inbound?.phoneE164 || "",
+    inbound?.profileName || "",
+    inbound?.providerMsgId || "",
+    inbound?.text || "",
+    suffix,
+  ].join("|");
+}
+
+function menuGreeting(profileName, seed = "") {
   const name = profileName ? ` ${profileName}` : "";
+  return pickText(
+    [
+      `¡Hola${name}! 👋\nSoy del equipo de InterWIFI.`,
+      `¡Qué tal${name}! 😊\nEstoy aquí para ayudarte con InterWIFI.`,
+      `¡Hola${name}! ✨\nCon gusto te apoyo desde InterWIFI.`,
+    ],
+    `menu_greeting:${seed}`
+  );
+}
+
+function menuOptions(seed = "") {
+  const intro = pickText(
+    [
+      "📋 Estas son las opciones disponibles:",
+      "😊 Te puedo ayudar con cualquiera de estas opciones:",
+      "📌 Elige la opción que necesites:",
+    ],
+    `menu_options:${seed}`
+  );
+
   return (
-    `¡Hola${name}!\n` +
-    `Soy del equipo de InterWIFI.\n\n` +
-    `¿En qué te ayudo hoy?\n` +
+    `${intro}\n\n` +
     `1. Contratar internet\n` +
     `2. Reportar una falla\n` +
     `3. Registrar un pago\n` +
     `4. Información\n` +
     `5. Cambio de domicilio\n` +
-    `6. Cambiar contraseña`
+    `6. Cambiar contraseña\n\n` +
+    `Comandos: *menú*, *inicio*, *cancelar*, *agente*`
   );
 }
 
-function greetingWithSession(existing) {
-  const label = getFlowLabel(existing?.flow);
+function menu(profileName, seed = "") {
+  return [menuGreeting(profileName, seed), menuOptions(seed)];
+}
 
-  return (
-    `¡Hola!\n` +
-    `Veo que tienes un proceso abierto de *${label}*.\n` +
-    `¿Seguimos con eso o te muestro el menú?`
+function greetingWithSession(existing, seed = "") {
+  const label = getFlowLabel(existing?.flow);
+  return pickText(
+    [
+      `¡Hola! 👋\nVeo que tienes un proceso abierto de *${label}*.\n¿Seguimos con eso o prefieres ver el menú? 😊`,
+      `Aquí sigo para ayudarte 😊\nTu proceso de *${label}* sigue abierto.\n¿Lo retomamos o te muestro el menú?`,
+      `¡Hola de nuevo! ✨\nTodavía tienes abierto tu proceso de *${label}*.\n¿Quieres continuar o prefieres ver el menú?`,
+    ],
+    `open_session:${seed}`
   );
 }
 
@@ -224,11 +264,15 @@ function getSwitchableFlowIntent(text, currentFlow) {
   return intent;
 }
 
-function buildResumeHint(flow) {
+function buildResumeHint(flow, seed = "") {
   const label = getFlowLabel(flow);
-  return (
-    `\n\nSi quieres, seguimos con tu proceso de *${label}*.` +
-    ` Puedes escribir *continuar* o enviarme el dato pendiente.`
+  return pickText(
+    [
+      `Si quieres, después seguimos con tu proceso de *${label}*. 😊`,
+      `Cuando quieras, retomamos tu proceso de *${label}*. 👍`,
+      `Si hace falta, enseguida volvemos a tu proceso de *${label}*. ✨`,
+    ],
+    `resume_hint:${label}:${seed}`
   );
 }
 
@@ -274,12 +318,13 @@ function shouldExitFaqToFlow(text) {
 }
 
 function getIntro(flow, inbound) {
+  const seed = buildReplySeed(inbound, `intro:${flow}`);
   if (flow === "CONTRATO") return contrato.intro(inbound.phoneE164);
   if (flow === "PAGO") return pago.intro();
   if (flow === "FALLA") return falla.intro();
   if (flow === "CAMBIO_DOMICILIO") return cambioDomicilio.intro();
   if (flow === "CAMBIO_CONTRASENA") return cambioContrasena.intro();
-  return faq.intro();
+  return faq.intro(seed);
 }
 
 // =====================
@@ -288,6 +333,7 @@ function getIntro(flow, inbound) {
 async function handleInbound({ inbound, send }) {
   const inboundText = String(inbound.text || "").trim();
   const providerMsgId = inbound.providerMsgId || null;
+  const replySeed = buildReplySeed(inbound);
 
   const inserted = await insertWaMessage({
     sessionId: null,
@@ -348,6 +394,14 @@ async function handleInbound({ inbound, send }) {
    * - NEVER sends caption separately (prevents rate-limit hits)
    */
   async function sendAndLog({ sessionId, flow, step, kind, out }) {
+    if (Array.isArray(out)) {
+      for (const item of out.flat(Infinity)) {
+        if (item === null || item === undefined || item === "") continue;
+        await sendAndLog({ sessionId, flow, step, kind, out: item });
+      }
+      return;
+    }
+
     const payload = normalizeOutbound(out);
 
     // noop
@@ -531,7 +585,7 @@ async function handleInbound({ inbound, send }) {
           flow: "MENU",
           step: 0,
           kind: "cancel_no_session",
-          out: `Listo ✅ No hay ningún proceso activo.\n\n${menu(inbound.profileName)}`,
+          out: ["Listo ✅ No hay ningún proceso activo.", menuOptions(`${replySeed}:cancel_no_session`)],
         });
         return;
       }
@@ -549,7 +603,10 @@ async function handleInbound({ inbound, send }) {
           flow: "MENU",
           step: 0,
           kind: "agent_no_session",
-          out: `Listo ✅ Ya avisé a un asesor. En breve te contactamos.\n\n${menu(inbound.profileName)}`,
+          out: [
+            "Listo ✅ Ya avisé a un asesor. En breve te contactamos 🙌",
+            menuOptions(`${replySeed}:agent_no_session`),
+          ],
         });
         return;
       }
@@ -578,7 +635,7 @@ async function handleInbound({ inbound, send }) {
           flow: "MENU",
           step: 0,
           kind: "menu_no_session",
-          out: menu(inbound.profileName),
+          out: menu(inbound.profileName, `${replySeed}:menu_no_session`),
         });
         return;
       }
@@ -609,7 +666,7 @@ async function handleInbound({ inbound, send }) {
             flow: "MENU",
             step: 0,
             kind: "menu_low_conf",
-            out: menu(inbound.profileName),
+            out: menu(inbound.profileName, `${replySeed}:menu_low_conf`),
           });
           return;
         }
@@ -647,7 +704,7 @@ async function handleInbound({ inbound, send }) {
           flow: "FAQ",
           step: 1,
           kind: "faq_menu_no_session",
-          out: faq.intro(),
+          out: faq.intro(`${replySeed}:faq_no_session`),
         });
         return;
       }
@@ -686,7 +743,7 @@ async function handleInbound({ inbound, send }) {
         flow: "MENU",
         step: 0,
         kind: "cancel_reset",
-        out: `Listo ✅ Proceso cancelado.\n\n${menu(inbound.profileName)}`,
+        out: ["Listo ✅ Proceso cancelado.", menuOptions(`${replySeed}:cancel_reset`)],
       });
       return;
     }
@@ -709,7 +766,10 @@ async function handleInbound({ inbound, send }) {
         flow: "MENU",
         step: 0,
         kind: "agent_requested",
-        out: `Listo ✅ Ya avisé a un asesor. En breve te contactamos.\n\n${menu(inbound.profileName)}`,
+        out: [
+          "Listo ✅ Ya avisé a un asesor. En breve te contactamos 🙌",
+          menuOptions(`${replySeed}:agent_requested`),
+        ],
       });
       return;
     }
@@ -723,7 +783,7 @@ async function handleInbound({ inbound, send }) {
         flow: "MENU",
         step: 0,
         kind: "faq_exit_to_menu",
-        out: menu(inbound.profileName),
+        out: menu(inbound.profileName, `${replySeed}:faq_exit_to_menu`),
       });
       return;
     }
@@ -767,10 +827,10 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: "menu_soft",
-        out:
-          `📌 Tienes un proceso abierto de *${label}*.\n` +
-          `Si quieres, seguimos con eso o elige otra opción:\n\n` +
-          menu(inbound.profileName),
+        out: [
+          `📌 Tienes un proceso abierto de *${label}*.\nSi quieres, seguimos con eso o elige otra opción 😊`,
+          menuOptions(`${replySeed}:menu_soft`),
+        ],
       });
       return;
     }
@@ -792,7 +852,7 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: "greeting_existing_session",
-        out: greetingWithSession(existing),
+        out: greetingWithSession(existing, `${replySeed}:greeting_existing_session`),
       });
       return;
     }
@@ -824,7 +884,14 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: "continue_session",
-        out: "Perfecto. Seguimos con tu proceso.",
+        out: pickText(
+          [
+            "Perfecto 😊 Seguimos con tu proceso.",
+            "Claro ✨ Continuamos con tu proceso.",
+            "Va que va 😊 Seguimos con eso.",
+          ],
+          `${replySeed}:continue_session`
+        ),
       });
       return;
     }
@@ -845,10 +912,10 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: "resume_prompt_to_menu",
-        out:
-          `📌 Tienes un proceso abierto de *${getFlowLabel(existing.flow)}*.\n` +
-          `Si quieres retomarlo después, aquí seguirá disponible.\n\n` +
-          menu(inbound.profileName),
+        out: [
+          `📌 Tienes un proceso abierto de *${getFlowLabel(existing.flow)}*.\nSi quieres retomarlo después, aquí seguirá disponible 😊`,
+          menuOptions(`${replySeed}:resume_prompt_to_menu`),
+        ],
       });
       return;
     }
@@ -897,7 +964,12 @@ async function handleInbound({ inbound, send }) {
           flow: existing.flow,
           step: existing.step,
           kind: inlineFaqReply ? "knowledge_inline_followup" : "faq_menu_inline_followup",
-          out: (inlineFaqReply || faq.intro()) + buildResumeHint(existing.flow),
+          out: inlineFaqReply
+            ? `${inlineFaqReply}\n\n${buildResumeHint(existing.flow, `${replySeed}:faq_inline_followup`)}`
+            : [
+                ...faq.intro(`${replySeed}:faq_inline_followup`),
+                buildResumeHint(existing.flow, `${replySeed}:faq_inline_followup`),
+              ],
         });
         return;
       }
@@ -926,7 +998,12 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: knowledge ? "knowledge_in_flow" : "faq_menu_in_flow",
-        out: (knowledge || faq.intro()) + buildResumeHint(existing.flow),
+        out: knowledge
+          ? `${knowledge}\n\n${buildResumeHint(existing.flow, `${replySeed}:faq_in_flow`)}`
+          : [
+              ...faq.intro(`${replySeed}:faq_in_flow`),
+              buildResumeHint(existing.flow, `${replySeed}:faq_in_flow`),
+            ],
       });
       return;
     }
@@ -981,7 +1058,10 @@ async function handleInbound({ inbound, send }) {
           flow: existing.flow,
           step: existing.step,
           kind: "faq_menu_by_number_in_flow",
-          out: faq.intro() + buildResumeHint(existing.flow),
+          out: [
+            ...faq.intro(`${replySeed}:faq_by_number_in_flow`),
+            buildResumeHint(existing.flow, `${replySeed}:faq_by_number_in_flow`),
+          ],
         });
         return;
       } else if (mainChoice !== existingFlow) {
@@ -1053,7 +1133,7 @@ async function handleInbound({ inbound, send }) {
         flow: existing.flow,
         step: existing.step,
         kind: "lock_failed",
-        out: menu(inbound.profileName),
+        out: menu(inbound.profileName, `${replySeed}:lock_failed`),
       });
       return;
     }
