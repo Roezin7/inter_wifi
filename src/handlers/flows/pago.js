@@ -5,6 +5,7 @@ const { createPayment } = require("../../services/paymentsService");
 const { notifyAdmin } = require("../../services/notifyService");
 const { parsePaymentMesMonto } = require("../../services/llmService");
 const { storeToR2 } = require("../../services/r2UploadService");
+const { pickInboundMedia } = require("../../utils/inboundMedia");
 
 // =====================
 // Copy / UX
@@ -72,25 +73,6 @@ async function safeParseMesMonto(text) {
   return { mes, monto };
 }
 
-/**
- * ✅ Media del inbound normalizado en /routes/wasender.js
- * inbound.media.items[0] trae: url, mimetype, mediaKey, id, etc.
- */
-function pickMedia(inboundMedia) {
-  const urls = inboundMedia?.urls || [];
-  const items = inboundMedia?.items || [];
-  const first = items?.[0] || null;
-
-  return {
-    url: first?.url || urls?.[0] || null,
-    id: first?.id || inboundMedia?.id || null,
-    mimetype: first?.mimetype || inboundMedia?.mimetype || null,
-    mediaKey: first?.mediaKey || null,
-    fileName: first?.fileName || null,
-    type: first?.type || null,
-  };
-}
-
 function buildAdminPaymentMsg(p) {
   const lines = [
     `💵 *PAGO REGISTRADO* ${p.folio}`,
@@ -110,7 +92,7 @@ function buildAdminPaymentMsg(p) {
  * ✅ Registra el pago AHORA (sin esperar otro inbound).
  * - Si comprobante es .enc, storeToR2 lo desencripta usando mediaKey.
  */
-async function registerPaymentNow({ session, data, phoneE164 }) {
+async function registerPaymentNow({ session, data, phoneE164, dbClient }) {
   let comprobantePublicUrl = data.comprobante_public_url || null;
   let comprobanteMime = data.comprobante_mime || null;
 
@@ -129,20 +111,23 @@ async function registerPaymentNow({ session, data, phoneE164 }) {
     comprobanteMime = uploaded?.contentType || comprobanteMime;
   }
 
-  const p = await createPayment({
-    phoneE164,
-    nombre: data.nombre,
-    mes: data.mes,
-    monto: data.monto,
+  const p = await createPayment(
+    {
+      phoneE164,
+      nombre: data.nombre,
+      mes: data.mes,
+      monto: data.monto,
 
-    // auditoría/origen
-    comprobante_url: data.comprobante_url || null,
-    comprobante_media_id: data.comprobante_media_id || null,
-    comprobante_mime: comprobanteMime || null,
+      // auditoría/origen
+      comprobante_url: data.comprobante_url || null,
+      comprobante_media_id: data.comprobante_media_id || null,
+      comprobante_mime: comprobanteMime || null,
 
-    // ✅ la buena
-    comprobante_public_url: comprobantePublicUrl || null,
-  });
+      // ✅ la buena
+      comprobante_public_url: comprobantePublicUrl || null,
+    },
+    dbClient
+  );
 
   await notifyAdmin(buildAdminPaymentMsg(p));
   return p;
@@ -151,7 +136,7 @@ async function registerPaymentNow({ session, data, phoneE164 }) {
 // =====================
 // Flow
 // =====================
-async function handle({ session, inbound, send, updateSession, closeSession }) {
+async function handle({ session, inbound, send, updateSession, closeSession, dbClient }) {
   const step = Number(session.step || 1);
   const data = session.data || {};
   const txt = String(inbound.text || "").trim();
@@ -177,7 +162,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
   if (step === 2) {
     // Si mandó comprobante primero
     if (hasMediaUrls(inbound.media)) {
-      const m = pickMedia(inbound.media);
+      const m = pickInboundMedia(inbound.media);
 
       if (!m.url || !m.mediaKey) {
         await send(
@@ -273,7 +258,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         await send("Perfecto ✅ Estoy registrando tu pago…");
 
         try {
-          const p = await registerPaymentNow({ session, data, phoneE164 });
+          const p = await registerPaymentNow({ session, data, phoneE164, dbClient });
           await closeSession(session.session_id);
           await send(`¡Gracias! ✅ Pago registrado.\nFolio: *${p.folio}*`);
           return;
@@ -310,7 +295,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    const m = pickMedia(inbound.media);
+    const m = pickInboundMedia(inbound.media);
     if (!m.url || !m.mediaKey) {
       await send(
         "No pude leer el comprobante 😅\n" +
@@ -347,7 +332,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     await send("Perfecto ✅ Estoy registrando tu pago…");
 
     try {
-      const p = await registerPaymentNow({ session, data: next, phoneE164 });
+      const p = await registerPaymentNow({ session, data: next, phoneE164, dbClient });
       await closeSession(session.session_id);
       await send(`¡Gracias! ✅ Pago registrado.\nFolio: *${p.folio}*`);
       return;

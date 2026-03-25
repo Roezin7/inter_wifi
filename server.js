@@ -6,12 +6,14 @@ const helmet = require("helmet");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 
-const { runMigrations } = require("./src/db");
+const { runMigrations, closePool } = require("./src/db");
 const wasenderRouter = require("./src/routes/wasender");
 const waRouter = require("./src/routes/wa");
 const { logger } = require("./src/utils/logger");
 
 const app = express();
+let server = null;
+let isShuttingDown = false;
 
 // Trust proxy (Render)
 app.set("trust proxy", 1);
@@ -38,15 +40,43 @@ app.get("/health", (req, res) => res.json({ ok: true }));
 app.use("/wasender", wasenderRouter); // inbound webhook
 app.use("/wa", waRouter); // outbound manual endpoint (opcional)
 
+async function shutdown(signal) {
+  if (isShuttingDown) return;
+  isShuttingDown = true;
+
+  logger.info(`${signal} received, shutting down`);
+
+  try {
+    if (server) {
+      await new Promise((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+
+    await closePool();
+    process.exit(0);
+  } catch (error) {
+    logger.error("Shutdown error", error);
+    process.exit(1);
+  }
+}
+
+["SIGINT", "SIGTERM"].forEach((signal) => {
+  process.on(signal, () => {
+    void shutdown(signal);
+  });
+});
+
 // Start
 async function start() {
   try {
     await runMigrations();
 
     const port = Number(process.env.PORT || 3000);
-    app.listen(port, () => logger.info(`Server running on port ${port}`));
+    server = app.listen(port, () => logger.info(`Server running on port ${port}`));
   } catch (e) {
     logger.error("Fatal start error", e);
+    await closePool().catch(() => {});
     process.exit(1);
   }
 }

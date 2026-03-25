@@ -211,19 +211,22 @@ router.post("/webhook", async (req, res) => {
   res.status(200).json({ ok: true });
 
   try {
-    if (!verifySecret(req)) return;
+    if (!verifySecret(req)) {
+      logger.warn("Webhook rejected: invalid secret");
+      return;
+    }
 
     const payload = req.body || {};
 
     if (payload.event === "webhook.test" || payload?.data?.test === true) return;
     if (isFromMe(payload)) return;
 
-    console.log("[WASENDER] payload.preview =", JSON.stringify(safePayloadPreview(payload), null, 2));
+    logger.debug("[WASENDER] payload.preview =", JSON.stringify(safePayloadPreview(payload), null, 2));
 
     const rawMedia = extractWasenderMedia(payload);
     if (rawMedia) {
-      console.log("[WASENDER] rawMedia.type =", rawMedia?._type || null);
-      console.log("[WASENDER] rawMedia =", JSON.stringify(rawMedia, null, 2));
+      logger.debug("[WASENDER] rawMedia.type =", rawMedia?._type || null);
+      logger.debug("[WASENDER] rawMedia =", JSON.stringify(rawMedia, null, 2));
     }
 
     const providerMsgId = getProviderMsgId(payload);
@@ -231,7 +234,10 @@ router.post("/webhook", async (req, res) => {
     const providerSession = extractSession(payload);
     const fromRaw = extractFromRaw(payload);
     const phoneE164 = normalizePhoneToE164(fromRaw);
-    if (!phoneE164) return;
+    if (!phoneE164) {
+      logger.warn("Webhook ignored: could not normalize phone");
+      return;
+    }
 
     const profileName = extractProfileName(payload);
 

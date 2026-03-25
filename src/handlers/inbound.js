@@ -774,6 +774,7 @@ async function handleInbound({ inbound, send }) {
     const ctx = {
       session: locked,
       inbound,
+      dbClient: client,
 
       // send text or object {type:"image", url, caption}
       send: async (out) => {

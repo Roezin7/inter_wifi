@@ -53,4 +53,8 @@ async function runMigrations() {
   logger.info("Migrations OK");
 }
 
-module.exports = { pool, query, runMigrations };
+async function closePool() {
+  await pool.end();
+}
+
+module.exports = { pool, query, runMigrations, closePool };

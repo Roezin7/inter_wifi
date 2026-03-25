@@ -2,6 +2,7 @@ const express = require("express");
 const { sendText } = require("../services/wasenderService");
 const { normalizeToE164 } = require("../utils/phoneUtils");
 const { insertWaMessage } = require("../services/messagesService");
+const { logger } = require("../utils/logger");
 
 const router = express.Router();
 
@@ -29,7 +30,7 @@ router.post("/outbound", async (req, res) => {
 
     return res.json({ ok: true, provider: providerResp });
   } catch (err) {
-    console.error("Outbound error:", err);
+    logger.error("Outbound error", err);
     return res.status(500).json({ ok: false, error: "server_error" });
   }
 });

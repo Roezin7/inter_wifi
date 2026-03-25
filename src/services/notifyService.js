@@ -1,5 +1,6 @@
 const { sendText } = require("./wasenderService");
 const { normalizeMX10ToE164 } = require("../utils/validators");
+const { logger } = require("../utils/logger");
 
 function getAdminE164() {
   const raw = String(process.env.ADMIN_PHONE_E164 || "").trim();
@@ -23,21 +24,21 @@ async function notifyAdmin(text) {
   const msg = String(text || "").trim();
 
   if (!admin) {
-    console.error("[ADMIN_NOTIFY] missing ADMIN_PHONE_E164");
+    logger.warn("[ADMIN_NOTIFY] missing ADMIN_PHONE_E164");
     return { ok: false, skipped: true, reason: "missing_admin_phone" };
   }
   if (!msg) return { ok: true, skipped: true };
 
   try {
     const res = await sendText({ toE164: admin, text: msg });
-    console.log("[ADMIN_NOTIFY] sent", { admin, ok: res?.ok });
+    logger.info("[ADMIN_NOTIFY] sent", { admin, ok: res?.ok });
     return res;
   } catch (err) {
-    console.error("[ADMIN_NOTIFY] failed", {
+    logger.error("[ADMIN_NOTIFY] failed", {
       admin,
       error: err?.message || String(err),
     });
-    throw err; // IMPORTANT: si quieres que no rompa el flow, cambia a "return {ok:false}"
+    return { ok: false, skipped: false, reason: "send_failed" };
   }
 }
 

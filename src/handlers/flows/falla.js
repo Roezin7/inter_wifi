@@ -52,7 +52,7 @@ function buildFolioMsg(folio) {
   );
 }
 
-async function handle({ session, inbound, send, sendImage, updateSession, closeSession }) {
+async function handle({ session, inbound, send, sendImage, updateSession, closeSession, dbClient }) {
   const step = Number(session.step || 1);
 
   // OJO: siempre clona data para no mutar referencias inesperadas
@@ -225,11 +225,14 @@ async function handle({ session, inbound, send, sendImage, updateSession, closeS
       return;
     }
 
-    const r = await createReport({
-      phoneE164,
-      nombre: data.nombre,
-      descripcion: txtRaw,
-    });
+    const r = await createReport(
+      {
+        phoneE164,
+        nombre: data.nombre,
+        descripcion: txtRaw,
+      },
+      dbClient
+    );
 
     await notifyAdmin(
       `🛠️ REPORTE DE FALLA ${r.folio}\n` +

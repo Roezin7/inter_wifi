@@ -6,8 +6,9 @@
   "type": "commonjs",
   "scripts": {
     "dev": "node server.js",
-    "migrate": "node -e \"require('./src/db').runMigrations()\"",
-    "start": "node server.js"
+    "migrate": "node -e \"const db=require('./src/db'); db.runMigrations().then(() => db.closePool()).catch(async (err) => { console.error(err); process.exitCode = 1; await db.closePool(); })\"",
+    "start": "node server.js",
+    "check": "node --check server.js && find src -name '*.js' -print0 | xargs -0 -n1 node --check"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.995.0",

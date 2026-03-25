@@ -11,6 +11,8 @@ const { notifyAdmin, buildNewContractAdminMsg } = require("../../services/notify
 const { parsePhoneE164 } = require("../../services/llmService");
 const { resolveColonia } = require("../../services/coverageService");
 const { storeToR2 } = require("../../services/r2UploadService");
+const { pickInboundMedia } = require("../../utils/inboundMedia");
+const { logger } = require("../../utils/logger");
 
 // ✅ Para evitar que replies/templates te cambien textos sin querer
 const USE_TEMPLATES = false;
@@ -49,24 +51,6 @@ function looksLikeNo(t) {
   return /(no|nel|incorrecto|equivocado|error)/i.test(String(t || "").trim());
 }
 
-/**
- * Normaliza media (WASender):
- * Recomendado: inbound.media.items[0] = { url, mimetype, mediaKey, fileName, id }
- */
-function pickMedia(inboundMedia) {
-  const urls = inboundMedia?.urls || [];
-  const items = inboundMedia?.items || [];
-  const first = items?.[0] || null;
-
-  return {
-    url: first?.url || urls?.[0] || null,
-    id: first?.id || inboundMedia?.id || null,
-    mimetype: first?.mimetype || inboundMedia?.mimetype || null,
-    mediaKey: first?.mediaKey || null,
-    fileName: first?.fileName || null,
-  };
-}
-
 // Copy: tips para foto (profesional, sin sonar “regaño”)
 function inePhotoTips(sideLabel) {
   return (
@@ -82,7 +66,7 @@ function inePhotoTips(sideLabel) {
 // =====================
 // Flow
 // =====================
-async function handle({ session, inbound, send, updateSession, closeSession }) {
+async function handle({ session, inbound, send, updateSession, closeSession, dbClient }) {
   const step = Number(session.step || 1);
   const data = session.data || {};
   const phoneE164 = session.phone_e164 || inbound.phoneE164;
@@ -240,7 +224,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    const m = pickMedia(inbound.media);
+    const m = pickInboundMedia(inbound.media);
 
     if (!m.url) {
       await send(
@@ -251,7 +235,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
 
     // 🔥 CLAVE: para descifrar .enc se necesita mediaKey + mimetype
     if (!m.mediaKey || !m.mimetype) {
-      console.error("[CONTRATO][INE_FRENTE] missing mediaKey/mimetype", {
+      logger.error("[CONTRATO][INE_FRENTE] missing mediaKey/mimetype", {
         hasUrl: !!m.url,
         hasMediaKey: !!m.mediaKey,
         mimetype: m.mimetype,
@@ -275,7 +259,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         phoneE164,
       });
     } catch (e) {
-      console.error("[CONTRATO][INE_FRENTE] storeToR2 failed:", e?.message || e);
+      logger.error("[CONTRATO][INE_FRENTE] storeToR2 failed", e?.message || e);
       await send(
         "Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?\n\n" +
           inePhotoTips("frente")
@@ -314,7 +298,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       return;
     }
 
-    const m = pickMedia(inbound.media);
+    const m = pickInboundMedia(inbound.media);
 
     if (!m.url) {
       await send(
@@ -324,7 +308,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
     }
 
     if (!m.mediaKey || !m.mimetype) {
-      console.error("[CONTRATO][INE_REVERSO] missing mediaKey/mimetype", {
+      logger.error("[CONTRATO][INE_REVERSO] missing mediaKey/mimetype", {
         hasUrl: !!m.url,
         hasMediaKey: !!m.mediaKey,
         mimetype: m.mimetype,
@@ -363,7 +347,7 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
         phoneE164,
       });
     } catch (e) {
-      console.error("[CONTRATO][INE_REVERSO] storeToR2 failed:", e?.message || e);
+      logger.error("[CONTRATO][INE_REVERSO] storeToR2 failed", e?.message || e);
       await send(
         "Tuve un problema guardando la imagen 😅 ¿Me la reenvías por favor?\n\n" +
           inePhotoTips("atrás")
@@ -380,22 +364,25 @@ async function handle({ session, inbound, send, updateSession, closeSession }) {
       ine_reverso_source_mediaKey: m.mediaKey,
     };
 
-    const c = await createContract({
-      phoneE164,
-      nombre: finalData.nombre,
-      colonia: finalData.colonia,
-      calle_numero: finalData.calle_numero,
-      telefono_contacto: finalData.telefono_contacto,
+    const c = await createContract(
+      {
+        phoneE164,
+        nombre: finalData.nombre,
+        colonia: finalData.colonia,
+        calle_numero: finalData.calle_numero,
+        telefono_contacto: finalData.telefono_contacto,
 
-      ine_frente_url: finalData.ine_frente_url,
-      ine_reverso_url: finalData.ine_reverso_url,
+        ine_frente_url: finalData.ine_frente_url,
+        ine_reverso_url: finalData.ine_reverso_url,
 
-      // opcionales
-      ine_frente_media_id: finalData.ine_frente_media_id,
-      ine_reverso_media_id: finalData.ine_reverso_media_id,
-      ine_frente_mime: finalData.ine_frente_mime,
-      ine_reverso_mime: finalData.ine_reverso_mime,
-    });
+        // opcionales
+        ine_frente_media_id: finalData.ine_frente_media_id,
+        ine_reverso_media_id: finalData.ine_reverso_media_id,
+        ine_frente_mime: finalData.ine_frente_mime,
+        ine_reverso_mime: finalData.ine_reverso_mime,
+      },
+      dbClient
+    );
 
     await notifyAdmin(buildNewContractAdminMsg(c));
     await closeSession(session.session_id);
