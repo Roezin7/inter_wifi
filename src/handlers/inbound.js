@@ -7,7 +7,10 @@ const {
   getKnowledgeByTopic,
   formatKnowledgeReply,
 } = require("../services/faqService");
-const { insertWaMessage } = require("../services/messagesService");
+const {
+  insertWaMessage,
+  getOutboundPresentationState,
+} = require("../services/messagesService");
 const {
   getOpenSessionByPhone,
   createSession,
@@ -32,6 +35,18 @@ const cambioContrasena = require("./flows/cambioContrasena");
 // =====================
 const SESSION_TIMEOUT_MIN = Number(process.env.SESSION_TIMEOUT_MIN || 20);
 const LLM_CONFIDENCE_MIN = Number(process.env.LLM_INTENT_MIN_CONF || 0.7);
+const WELCOME_IMAGE_URL = String(
+  process.env.WELCOME_IMAGE_URL || process.env.NEW_SESSION_IMAGE_URL || ""
+).trim();
+const WELCOME_IMAGE_CAPTION = String(process.env.WELCOME_IMAGE_CAPTION || "").trim();
+const WELCOME_GREETING_COOLDOWN_MIN = Math.max(
+  0,
+  Number(process.env.WELCOME_GREETING_COOLDOWN_MIN || 180)
+);
+const WELCOME_IMAGE_COOLDOWN_MIN = Math.max(
+  0,
+  Number(process.env.WELCOME_IMAGE_COOLDOWN_MIN || 720)
+);
 
 // =====================
 // Copy / UI
@@ -97,6 +112,69 @@ function menuOptions(seed = "") {
 
 function menu(profileName, seed = "") {
   return [menuGreeting(profileName, seed), menuOptions(seed)];
+}
+
+function welcomeImageCaption(seed = "") {
+  return WELCOME_IMAGE_CAPTION || pickText(
+    [
+      "📌 Te comparto esta guía rápida para ubicarte más fácil.",
+      "✨ Aquí tienes una guía breve para elegir más rápido lo que necesitas.",
+      "😊 Te dejo esta imagen para que te sea más fácil ubicar las opciones.",
+    ],
+    `welcome_image_caption:${seed}`
+  );
+}
+
+async function buildNoSessionMenu({
+  phoneE164,
+  profileName,
+  seed = "",
+  reason = "menu",
+  client,
+}) {
+  const state = await getOutboundPresentationState(
+    phoneE164,
+    {
+      greetingCooldownMin: WELCOME_GREETING_COOLDOWN_MIN,
+      imageCooldownMin: WELCOME_IMAGE_COOLDOWN_MIN,
+    },
+    client
+  );
+
+  const firstContact = !state.has_outbound_history;
+  const showGreeting =
+    !state.greeted_recently && (reason === "hello" || firstContact);
+  const showImage =
+    !!WELCOME_IMAGE_URL &&
+    !state.image_recently &&
+    ["hello", "menu", "low_conf", "first_contact"].includes(reason);
+
+  const packets = [];
+
+  if (showGreeting) {
+    packets.push({
+      kind: "welcome_greeting",
+      out: menuGreeting(profileName, `${seed}:greeting`),
+    });
+  }
+
+  if (showImage) {
+    packets.push({
+      kind: "welcome_image",
+      out: {
+        type: "image",
+        url: WELCOME_IMAGE_URL,
+        caption: welcomeImageCaption(`${seed}:image`),
+      },
+    });
+  }
+
+  packets.push({
+    kind: "menu_options",
+    out: menuOptions(`${seed}:options`),
+  });
+
+  return packets;
 }
 
 function greetingWithSession(existing, seed = "") {
@@ -415,6 +493,21 @@ async function handleInbound({ inbound, send }) {
     if (Array.isArray(out)) {
       for (const item of out.flat(Infinity)) {
         if (item === null || item === undefined || item === "") continue;
+
+        if (
+          isOutboundObject(item) &&
+          Object.prototype.hasOwnProperty.call(item, "out")
+        ) {
+          await sendAndLog({
+            sessionId: item.sessionId ?? sessionId,
+            flow: item.flow || flow,
+            step: item.step ?? step,
+            kind: item.kind || kind,
+            out: item.out,
+          });
+          continue;
+        }
+
         await sendAndLog({ sessionId, flow, step, kind, out: item });
       }
       return;
@@ -647,13 +740,25 @@ async function handleInbound({ inbound, send }) {
       }
 
       if (!inboundText || isGreetingOnly(inboundText) || isMenuWord(inboundText)) {
+        const menuReason =
+          !inboundText || isGreetingOnly(inboundText)
+            ? "hello"
+            : "menu";
+        const menuOut = await buildNoSessionMenu({
+          phoneE164: inbound.phoneE164,
+          profileName: inbound.profileName,
+          seed: `${replySeed}:menu_no_session`,
+          reason: menuReason,
+          client,
+        });
+
         await client.query("COMMIT");
         await sendAndLog({
           sessionId: null,
           flow: "MENU",
           step: 0,
           kind: "menu_no_session",
-          out: menu(inbound.profileName, `${replySeed}:menu_no_session`),
+          out: menuOut,
         });
         return;
       }
@@ -678,13 +783,21 @@ async function handleInbound({ inbound, send }) {
         const conf = Number(routed?.confidence ?? 0);
 
         if (!routed?.intent || conf < LLM_CONFIDENCE_MIN) {
+          const menuOut = await buildNoSessionMenu({
+            phoneE164: inbound.phoneE164,
+            profileName: inbound.profileName,
+            seed: `${replySeed}:menu_low_conf`,
+            reason: "low_conf",
+            client,
+          });
+
           await client.query("COMMIT");
           await sendAndLog({
             sessionId: null,
             flow: "MENU",
             step: 0,
             kind: "menu_low_conf",
-            out: menu(inbound.profileName, `${replySeed}:menu_low_conf`),
+            out: menuOut,
           });
           return;
         }

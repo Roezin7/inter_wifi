@@ -2,6 +2,10 @@
 const crypto = require("crypto");
 const { query } = require("../db");
 
+function q(client) {
+  return client ? client.query.bind(client) : query;
+}
+
 function norm(s) {
   return String(s || "")
     .toLowerCase()
@@ -94,4 +98,54 @@ async function insertWaMessage({
   return rows[0] || null;
 }
 
-module.exports = { insertWaMessage };
+async function getOutboundPresentationState(
+  phoneE164,
+  { greetingCooldownMin = 180, imageCooldownMin = 720 } = {},
+  client = null
+) {
+  const run = q(client);
+  const safeGreetingCooldownMin = Math.max(0, Number(greetingCooldownMin || 0));
+  const safeImageCooldownMin = Math.max(0, Number(imageCooldownMin || 0));
+
+  const { rows } = await run(
+    `
+    select
+      exists(
+        select 1
+        from wa_messages
+        where phone_e164 = $1
+          and direction = 'OUT'
+        limit 1
+      ) as has_outbound_history,
+      exists(
+        select 1
+        from wa_messages
+        where phone_e164 = $1
+          and direction = 'OUT'
+          and coalesce(raw->>'kind', '') in ('welcome_greeting', 'menu_no_session', 'menu_low_conf')
+          and created_at >= now() - ($2::int * interval '1 minute')
+        limit 1
+      ) as greeted_recently,
+      exists(
+        select 1
+        from wa_messages
+        where phone_e164 = $1
+          and direction = 'OUT'
+          and coalesce(raw->>'kind', '') = 'welcome_image'
+          and created_at >= now() - ($3::int * interval '1 minute')
+        limit 1
+      ) as image_recently
+    `,
+    [phoneE164, safeGreetingCooldownMin, safeImageCooldownMin]
+  );
+
+  return (
+    rows[0] || {
+      has_outbound_history: false,
+      greeted_recently: false,
+      image_recently: false,
+    }
+  );
+}
+
+module.exports = { insertWaMessage, getOutboundPresentationState };

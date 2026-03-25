@@ -11,7 +11,7 @@ const {
 } = require("../utils/waPayload");
 
 const { sendText, sendImage } = require("../services/wasenderService");
-const { handleInbound, menu } = require("../handlers/inbound");
+const { handleInbound } = require("../handlers/inbound");
 const { logger } = require("../utils/logger");
 
 const router = express.Router();
@@ -245,11 +245,6 @@ router.post("/webhook", async (req, res) => {
     const inboundText = String(safeExtractText(payload) || "").trim();
 
     const send = async (out) => sendOutbound({ toE164: phoneE164, out });
-
-    if (!inboundText && (!media || media.count === 0)) {
-      await send(menu(profileName));
-      return;
-    }
 
     await handleInbound({
       inbound: {
