@@ -8,12 +8,10 @@ const {
   notifyAdmin,
   buildAddressChangeAdminMsg,
 } = require("../../services/notifyService");
+const { introPair, nextPair, closePair } = require("../../utils/flowCopy");
 
 function intro() {
-  return (
-    "Con gusto te apoyo con el cambio de domicilio.\n\n" +
-    "Para empezar, compárteme el *nombre completo del titular*."
-  );
+  return introPair("cambio_domicilio", "Para empezar, compárteme el *nombre completo del titular*.");
 }
 
 async function resolvePhone(raw, fallbackE164) {
@@ -39,41 +37,41 @@ async function handle({ session, inbound, send, updateSession, closeSession, not
 
   if (step === 1) {
     if (!hasMinLen(text, 3)) {
-      await send("Necesito el *nombre completo del titular* para continuar.");
+      await send("Necesito el *nombre completo del titular* para continuar 😊");
       return;
     }
 
     await updateSession({ step: 2, data: { ...data, nombre: text } });
-    await send("Gracias. Ahora compárteme el *domicilio actual* del servicio.");
+    await send(nextPair("cambio_domicilio:actual", "Ahora compárteme el *domicilio actual* del servicio."));
     return;
   }
 
   if (step === 2) {
     if (!hasMinLen(text, 8)) {
-      await send("Compárteme el *domicilio actual* con el mayor detalle posible.");
+      await send("Compárteme el *domicilio actual* con el mayor detalle posible 😊");
       return;
     }
 
     await updateSession({ step: 3, data: { ...data, domicilio_actual: text } });
-    await send("Perfecto. Ahora compárteme el *nuevo domicilio*.");
+    await send(nextPair("cambio_domicilio:nuevo", "Ahora compárteme el *nuevo domicilio*."));
     return;
   }
 
   if (step === 3) {
     if (!hasMinLen(text, 8)) {
-      await send("Compárteme el *nuevo domicilio* con el mayor detalle posible.");
+      await send("Compárteme el *nuevo domicilio* con el mayor detalle posible 😊");
       return;
     }
 
     await updateSession({ step: 4, data: { ...data, nuevo_domicilio: text } });
-    await send("¿Qué *teléfono de contacto* dejamos? Puedes escribir *mismo* si quieres usar este número.");
+    await send(nextPair("cambio_domicilio:phone", "¿Qué *teléfono de contacto* dejamos?\nPuedes escribir *mismo* si quieres usar este número."));
     return;
   }
 
   if (step === 4) {
     const telefono = await resolvePhone(text, phoneE164);
     if (!telefono) {
-      await send("Compárteme un *teléfono de contacto* de 10 dígitos o escribe *mismo*.");
+      await send("Compárteme un *teléfono de contacto* de 10 dígitos o escribe *mismo* 😊");
       return;
     }
 
@@ -87,14 +85,16 @@ async function handle({ session, inbound, send, updateSession, closeSession, not
     await closeSession(session.session_id);
 
     await send(
-      "Listo. Ya registré tu solicitud de *cambio de domicilio*.\n\n" +
-        "Un asesor se comunicará contigo para continuar el proceso."
+      closePair(
+        "cambio_domicilio:done",
+        "Ya registré tu solicitud de *cambio de domicilio*.\n\nUn asesor se comunicará contigo para continuar el proceso."
+      )
     );
     return;
   }
 
   await closeSession(session.session_id);
-  await send("Listo. Si necesitas algo más, aquí estoy.");
+  await send(closePair("cambio_domicilio:fallback", "Si necesitas algo más, aquí estoy 😊"));
 }
 
 module.exports = { intro, handle };

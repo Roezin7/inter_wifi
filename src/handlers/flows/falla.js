@@ -2,14 +2,12 @@
 const { hasMinLen } = require("../../utils/validators");
 const { createReport } = require("../../services/reportsService");
 const { notifyAdmin } = require("../../services/notifyService");
+const { introPair, nextPair, closePair } = require("../../utils/flowCopy");
 
 function intro() {
-  return (
-    "Claro, te apoyo con la falla.\n\n" +
-    "Tu servicio está:\n" +
-    "A. *Sin internet*\n" +
-    "B. *Lento o intermitente*\n\n" +
-    "Responde *A* o *B*."
+  return introPair(
+    "falla",
+    "Cuéntame cómo está tu servicio:\n*A*. Sin internet\n*B*. Lento o intermitente"
   );
 }
 
@@ -48,11 +46,9 @@ function pickLights(t) {
 }
 
 function buildFolioMsg(folio) {
-  return (
-    `✅ *Reporte generado*\n` +
-    `Folio: *${folio}*\n\n` +
-    `No hace falta levantar otro reporte por este mismo caso.\n` +
-    `Nos vamos a comunicar contigo conforme avance tu turno.`
+  return closePair(
+    `falla:folio:${folio}`,
+    `*Reporte generado*\nFolio: *${folio}*\n\nNo hace falta levantar otro reporte por este mismo caso.\nNos vamos a comunicar contigo conforme avance tu turno.`
   );
 }
 
@@ -105,8 +101,10 @@ async function handle({
     }
 
     await send(
-      "¿Los focos del módem/router se ven *verdes* o *naranjas/rojos*?\n" +
-        "Responde: *verdes* / *naranjas*"
+      nextPair(
+        `falla:lights:${ab}`,
+        "¿Los focos del módem/router se ven *verdes* o *naranjas/rojos*?\nRespóndeme: *verdes* o *naranjas*."
+      )
     );
     return;
   }
@@ -115,7 +113,7 @@ async function handle({
   if (step === 2) {
     const lights = pickLights(txtRaw);
     if (!lights) {
-      await send("Para ubicarlo: ¿se ven *verdes* o *naranjas/rojos*? (verdes / naranjas)");
+      await send("Para ubicarlo mejor 😊 ¿se ven *verdes* o *naranjas/rojos*?");
       return;
     }
 
@@ -123,41 +121,39 @@ async function handle({
     if (lights === "NARANJA") {
       await updateSession({ step: 3, data: { ...data, lights } });
       await send(
-        "Eso normalmente indica un cable flojo o mal conectado.\n" +
-          "¿Ya desconectaste y reconectaste *cable por cable* hasta escuchar el clic? Responde *sí* o *no*."
+        nextPair(
+          "falla:cables_check",
+          "Eso normalmente indica un cable flojo o mal conectado.\n\n¿Ya desconectaste y reconectaste *cable por cable* hasta escuchar el clic?\nRespóndeme *sí* o *no*."
+        )
       );
       return;
     }
 
     // luces verdes -> power-cycle directo
     await updateSession({ step: 4, data: { ...data, lights } });
-    await send(
-      "Perfecto.\n" +
-        "Ahora desconecta de la luz *módem y router* por *3 minutos* ⏱️\n" +
-        "Luego conéctalos y espera *2 minutos*.\n\n" +
-        "¿Se restableció el internet? Responde *sí* o *no*."
-    );
+    await send([
+      ...nextPair("falla:power_cycle_intro", "Vamos a hacer una prueba rápida con tu equipo."),
+      "Desconecta de la luz *módem y router* por *3 minutos* ⏱️\nLuego conéctalos y espera *2 minutos*.\n\nCuando termine, dime si ya volvió el internet.",
+    ]);
     return;
   }
 
   // STEP 3: confirmación cables
   if (step === 3) {
     if (isNo(txtRaw)) {
-      await send("Hazlo, por favor, y cuando termines responde *listo*.");
+      await send("Hazlo, por favor 😊 Cuando termines, respóndeme *listo*.");
       return;
     }
     if (!isYes(txtRaw) && norm(txtRaw) !== "listo") {
-      await send("Responde *sí* (ya lo hice) o *no* (aún no).");
+      await send("Respóndeme *sí* si ya lo hiciste o *no* si todavía no 😊");
       return;
     }
 
     await updateSession({ step: 4, data: { ...data, cables_checked: true } });
-    await send(
-      "Gracias.\n" +
-        "Ahora desconecta de la luz *módem y router* por *3 minutos* ⏱️\n" +
-        "Luego conéctalos y espera *2 minutos*.\n\n" +
-        "¿Se restableció el internet? Responde *sí* o *no*."
-    );
+    await send([
+      ...nextPair("falla:power_cycle_after_cables", "Ahora vamos con una prueba rápida de reinicio."),
+      "Desconecta de la luz *módem y router* por *3 minutos* ⏱️\nLuego conéctalos y espera *2 minutos*.\n\nCuando termine, dime si ya volvió el internet.",
+    ]);
     return;
   }
 
@@ -165,16 +161,16 @@ async function handle({
   if (step === 4) {
     if (isYes(txtRaw)) {
       await closeSession();
-      await send("Perfecto. Me da gusto que ya haya quedado. Si vuelve a fallar, escríbeme y con gusto te apoyo.");
+      await send(closePair("falla:restored", "Me da gusto que ya haya quedado 😊\nSi vuelve a fallar, escríbeme y con gusto te apoyo."));
       return;
     }
     if (!isNo(txtRaw)) {
-      await send("¿Se restableció? Responde *sí* o *no*.");
+      await send("¿Ya se restableció el internet?\nRespóndeme *sí* o *no* 😊");
       return;
     }
 
     await updateSession({ step: 5, data: { ...data, power_cycle_done: true } });
-    await send("¿Aparece el nombre de tu red WiFi en el celular o en la computadora? Responde *sí* o *no*.");
+    await send(nextPair("falla:ssid_visible", "¿Aparece el nombre de tu red WiFi en el celular o en la computadora?\nRespóndeme *sí* o *no*."));
     return;
   }
 
@@ -186,54 +182,54 @@ async function handle({
       return;
     }
     if (!isNo(txtRaw)) {
-      await send("Responde *sí* o *no*.");
+      await send("Respóndeme *sí* o *no* 😊");
       return;
     }
 
     await updateSession({ step: 6, data: { ...data, ssid_visible: false } });
-    await send(
-      "Revisa la *etiqueta detrás del módem*: ahí viene el nombre de la red (SSID) y la contraseña.\n" +
-        "¿Ya intentaste conectarte con esos datos? Responde *sí* o *no*."
-    );
+    await send([
+      ...nextPair("falla:check_label", "Revisa la *etiqueta detrás del módem*: ahí viene el nombre de la red y la contraseña."),
+      "¿Ya intentaste conectarte con esos datos?\nRespóndeme *sí* o *no*.",
+    ]);
     return;
   }
 
   // STEP 6: intentó etiqueta
   if (step === 6) {
     if (isNo(txtRaw)) {
-      await send("Inténtalo, por favor, y cuando termines responde *listo*.");
+      await send("Inténtalo, por favor 😊 Cuando termines, respóndeme *listo*.");
       return;
     }
     if (!isYes(txtRaw) && norm(txtRaw) !== "listo") {
-      await send("Responde *sí* (ya lo intenté) o *no* (aún no).");
+      await send("Respóndeme *sí* si ya lo intentaste o *no* si todavía no 😊");
       return;
     }
 
     await updateSession({ step: 7, data: { ...data, label_tried: true } });
-    await send("Gracias. Para levantar el reporte: ¿A nombre de quién está el servicio?");
+    await send(nextPair("falla:ask_name", "Para levantar el reporte, ¿a nombre de quién está el servicio?"));
     return;
   }
 
   // STEP 7: nombre
   if (step === 7) {
     if (!hasMinLen(txtRaw, 3)) {
-      await send("¿A nombre de quién está el servicio?");
+      await send("Necesito el nombre del titular para continuar 😊");
       return;
     }
     await updateSession({ step: 8, data: { ...data, nombre: txtRaw } });
-    await send("Describe en una frase qué pasa y desde cuándo.");
+    await send(nextPair("falla:ask_description", "Descríbeme en una frase qué pasa y desde cuándo."));
     return;
   }
 
   // STEP 8: descripción + crear reporte
   if (step === 8) {
     if (!hasMinLen(txtRaw, 5)) {
-      await send("Dime un poquito más: ¿qué pasa exactamente y desde cuándo?");
+      await send("Cuéntame un poquito más 😊 ¿qué pasa exactamente y desde cuándo?");
       return;
     }
 
     if (!phoneE164) {
-      await send("No pude identificar tu número. Escribe *agente* y te apoyo con un asesor.");
+      await send("No pude identificar tu número 😕 Escribe *agente* y te apoyo con un asesor.");
       await closeSession();
       return;
     }
@@ -262,7 +258,7 @@ async function handle({
   }
 
   await closeSession();
-  await send("Listo. Si necesitas algo más, aquí estoy.");
+  await send(closePair("falla:fallback", "Si necesitas algo más, aquí estoy 😊"));
 }
 
 module.exports = { intro, handle };

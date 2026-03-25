@@ -6,12 +6,13 @@ const { notifyAdmin } = require("../../services/notifyService");
 const { parsePaymentMesMonto } = require("../../services/llmService");
 const { storeToR2 } = require("../../services/r2UploadService");
 const { pickInboundMedia } = require("../../utils/inboundMedia");
+const { introPair, nextPair, confirmPair, closePair } = require("../../utils/flowCopy");
 
 // =====================
 // Copy / UX
 // =====================
 function intro() {
-  return "Con gusto. ¿A nombre de quién está el servicio?";
+  return introPair("pago", "Para empezar, ¿a nombre de quién está el servicio?");
 }
 
 function looksLikeYes(t) {
@@ -159,15 +160,16 @@ async function handle({
   // STEP 1: nombre
   if (step === 1) {
     if (!hasMinLen(txt, 3)) {
-      await send("¿A nombre de quién está el servicio?");
+      await send("Necesito el nombre del titular para continuar 😊");
       return;
     }
     await updateSession({ step: 2, data: { ...data, nombre: txt } });
 
     await send(
-      "Gracias. ¿De qué *mes* es el pago y de cuánto fue?\n" +
-        "Por ejemplo: *enero 500*.\n\n" +
-        "Si quieres, también puedes mandar primero el *comprobante*."
+      nextPair(
+        "pago:ask_month_amount",
+        "¿De qué *mes* es el pago y de cuánto fue?\nPor ejemplo: *enero 500*.\n\nSi quieres, también puedes mandar primero el *comprobante*."
+      )
     );
     return;
   }
@@ -179,10 +181,7 @@ async function handle({
       const m = pickInboundMedia(inbound.media);
 
       if (!m.url || !m.mediaKey) {
-        await send(
-          "No pude leer el comprobante.\n" +
-            "Reenvíalo como *foto o PDF*, por favor."
-        );
+        await send("No pude leer el comprobante 😕 Reenvíalo como *foto o PDF*, por favor.");
         return;
       }
 
@@ -198,7 +197,7 @@ async function handle({
           phoneE164,
         });
       } catch (e) {
-        await send("Tuve un problema guardando el comprobante. Reenvíalo como *foto o PDF*, por favor.");
+        await send("Tuve un problema guardando el comprobante 😕 Reenvíalo como *foto o PDF*, por favor.");
         return;
       }
 
@@ -212,7 +211,7 @@ async function handle({
       };
 
       await updateSession({ step: 22, data: next });
-      await send("Listo. Ahora dime de qué *mes* fue y de cuánto.");
+      await send(nextPair("pago:receipt_first", "Ya tengo el comprobante.\nAhora dime de qué *mes* fue y de cuánto."));
       return;
     }
 
@@ -235,7 +234,7 @@ async function handle({
 
     const next = { ...data, mes, monto };
     await updateSession({ step: 25, data: next });
-    await send(`Solo para confirmar: *${mes}* por *$${monto}*. ¿Correcto?`);
+    await send(confirmPair(`pago:confirm:${mes}:${monto}`, `*${mes}* por *$${monto}*.\n¿Correcto?`));
     return;
   }
 
@@ -259,7 +258,7 @@ async function handle({
 
     const next = { ...data, mes, monto };
     await updateSession({ step: 25, data: next });
-    await send(`Solo para confirmar: *${mes}* por *$${monto}*. ¿Correcto?`);
+    await send(confirmPair(`pago:confirm_receipt:${mes}:${monto}`, `*${mes}* por *$${monto}*.\n¿Correcto?`));
     return;
   }
 
@@ -269,7 +268,7 @@ async function handle({
       const hasReceipt = !!(data.comprobante_public_url || data.comprobante_url);
 
       if (hasReceipt) {
-        await send("Perfecto. Estoy registrando tu pago.");
+        await send("Perfecto 😊 Estoy registrando tu pago.");
 
         try {
           const p = await registerPaymentNow({
@@ -280,11 +279,11 @@ async function handle({
             notifyAdminFn: notifyAdminFn || notifyAdmin,
           });
           await closeSession(session.session_id);
-          await send(`Gracias. Tu pago quedó registrado.\nFolio: *${p.folio}*`);
+          await send(closePair(`pago:done:${p.folio}`, `Tu pago quedó registrado.\nFolio: *${p.folio}*`));
           return;
         } catch (e) {
           await send(
-            "Tuve un problema al registrar el pago.\n" +
+            "Tuve un problema al registrar el pago 😕\n" +
               "Reenvíame el comprobante y el dato del mes con el monto, por favor."
           );
           await updateSession({ step: 2, data: { ...data } });
@@ -293,7 +292,7 @@ async function handle({
       }
 
       await updateSession({ step: 3, data });
-      await send("Listo. Envíame el *comprobante* en foto o PDF.");
+      await send(nextPair("pago:ask_receipt", "Envíame el *comprobante* en foto o PDF."));
       return;
     }
 
@@ -304,23 +303,20 @@ async function handle({
       return;
     }
 
-    await send("Por favor confírmame con *sí* o *no*.");
+    await send("Por favor, confírmame con *sí* o *no* 😊");
     return;
   }
 
   // STEP 3: esperar comprobante
   if (step === 3) {
     if (!hasMediaUrls(inbound.media)) {
-      await send("Necesito el *comprobante* en foto o PDF.");
+      await send("Necesito el *comprobante* en foto o PDF 😊");
       return;
     }
 
     const m = pickInboundMedia(inbound.media);
     if (!m.url || !m.mediaKey) {
-      await send(
-        "No pude leer el comprobante.\n" +
-          "Reenvíalo como *foto o PDF*, por favor."
-      );
+      await send("No pude leer el comprobante 😕 Reenvíalo como *foto o PDF*, por favor.");
       return;
     }
 
@@ -336,7 +332,7 @@ async function handle({
         phoneE164,
       });
     } catch (e) {
-      await send("Tuve un problema guardando el comprobante. Reenvíalo como *foto o PDF*, por favor.");
+      await send("Tuve un problema guardando el comprobante 😕 Reenvíalo como *foto o PDF*, por favor.");
       return;
     }
 
@@ -349,7 +345,7 @@ async function handle({
       comprobante_mime: uploaded?.contentType || m.mimetype || null,
     };
 
-    await send("Perfecto. Estoy registrando tu pago.");
+    await send("Perfecto 😊 Estoy registrando tu pago.");
 
     try {
       const p = await registerPaymentNow({
@@ -360,11 +356,11 @@ async function handle({
         notifyAdminFn: notifyAdminFn || notifyAdmin,
       });
       await closeSession(session.session_id);
-      await send(`Gracias. Tu pago quedó registrado.\nFolio: *${p.folio}*`);
+      await send(closePair(`pago:done_receipt:${p.folio}`, `Tu pago quedó registrado.\nFolio: *${p.folio}*`));
       return;
     } catch (e) {
       await send(
-        "Tuve un problema al registrar el pago.\n" +
+        "Tuve un problema al registrar el pago 😕\n" +
           "Reenvíame el comprobante y vuelve a decirme el mes con el monto, por favor."
       );
       await updateSession({ step: 2, data: { ...data, ...next } });
@@ -373,7 +369,7 @@ async function handle({
   }
 
   await closeSession(session.session_id);
-  await send("Listo.");
+  await send(closePair("pago:fallback", "Si necesitas algo más, aquí te apoyo 😊"));
 }
 
 module.exports = { intro, handle };

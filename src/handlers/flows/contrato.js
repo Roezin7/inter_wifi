@@ -13,6 +13,7 @@ const { resolveColonia } = require("../../services/coverageService");
 const { storeToR2 } = require("../../services/r2UploadService");
 const { pickInboundMedia } = require("../../utils/inboundMedia");
 const { logger } = require("../../utils/logger");
+const { introPair, nextPair, confirmPair, closePair, pickText } = require("../../utils/flowCopy");
 
 // ✅ Para evitar que replies/templates te cambien textos sin querer
 const USE_TEMPLATES = false;
@@ -28,17 +29,27 @@ if (USE_TEMPLATES) {
 // =====================
 function intro() {
   if (templates && pick) return pick(templates.contrato_intro, "seed")();
-  return "Perfecto. Para revisar cobertura necesito tu *colonia*.";
+  return introPair("contrato", "Para empezar, compárteme tu *colonia*.");
 }
 
 function askColonia() {
   if (templates && pick) return pick(templates.ask_colonia_more_detail, "seed")();
-  return "Compárteme tu *colonia* para revisar cobertura.";
+  return pickText(
+    [
+      "Compárteme tu *colonia* para continuar 😊",
+      "Solo necesito tu *colonia* para seguir ✨",
+      "Pásame tu *colonia* y seguimos 😊",
+    ],
+    "contrato:ask_colonia"
+  );
 }
 
 function confirmColonia(col) {
   if (templates && pick) return pick(templates.confirm_colonia, "seed")(col);
-  return `¿Te refieres a la colonia *${col}*? Responde *sí* o *no*.`;
+  return confirmPair(
+    `contrato:confirm_colonia:${col}`,
+    `¿Te refieres a la colonia *${col}*?\nRespóndeme *sí* o *no*.`
+  );
 }
 
 function looksLikeYes(t) {
@@ -65,10 +76,9 @@ function pickColoniaInput(text, guess) {
 }
 
 function buildManualColoniaCaptureMsg(colonia) {
-  return (
-    `Gracias 😊 Tomo la colonia como *${colonia}*.\n` +
-    "La revisaremos al validar la solicitud.\n\n" +
-    "Ahora compárteme tu *calle y número*."
+  return nextPair(
+    `contrato:manual_colonia:${colonia}`,
+    `Tomo la colonia como *${colonia}*.\nLa revisaremos al validar la solicitud.\n\nAhora compárteme tu *calle y número*.`
   );
 }
 
@@ -132,7 +142,7 @@ async function handle({
       const looksLikeAddress = /[,\d]/.test(txt);
 
       if (looksLikeAddress && !coloniaGuess) {
-        await send("Para ubicar bien la cobertura, primero necesito que me compartas solo la *colonia*.");
+        await send("Para ubicar bien la cobertura, primero necesito que me compartas solo la *colonia* 😊");
         return;
       }
 
@@ -165,8 +175,10 @@ async function handle({
 
       await updateSession({ step: 11, data: nextData });
       await send(
-        `Perfecto ✅ Colonia *${nextData.colonia}*.\n` +
-          "Ahora compárteme tu *calle y número*."
+        nextPair(
+          `contrato:auto_colonia:${nextData.colonia}`,
+          `Colonia *${nextData.colonia}*.\nAhora compárteme tu *calle y número*.`
+        )
       );
       return;
     }
@@ -196,10 +208,11 @@ async function handle({
       nextData.zona = null;
       nextData.coverage_source = "db_confirmed";
       await updateSession({ step: 11, data: nextData });
-
       await send(
-        `Listo ✅ Colonia *${colonia}*.\n` +
-          "Ahora compárteme tu *calle y número*."
+        nextPair(
+          `contrato:confirmed_colonia:${colonia}`,
+          `Colonia *${colonia}*.\nAhora compárteme tu *calle y número*.`
+        )
       );
       return;
     }
@@ -210,11 +223,11 @@ async function handle({
         step: 1,
         data: { ...data, colonia_guess: null, colonia_candidates: null },
       });
-      await send("De acuerdo. Compárteme tu *colonia* para revisarla de nuevo.");
+      await send("De acuerdo 😊 Compárteme tu *colonia* para revisarla de nuevo.");
       return;
     }
 
-    await send("Por favor confírmame con *sí* o *no*.");
+    await send("Por favor, confírmame con *sí* o *no* 😊");
     return;
   }
 
@@ -229,7 +242,7 @@ async function handle({
 
     const nextData = { ...data, calle_numero: txt };
     await updateSession({ step: 2, data: nextData });
-    await send("Gracias. Ahora compárteme tu *nombre completo*.");
+    await send(nextPair("contrato:ask_name", "Ahora compárteme tu *nombre completo*."));
     return;
   }
 
@@ -243,7 +256,12 @@ async function handle({
     }
 
     await updateSession({ step: 3, data: { ...data, nombre: txt } });
-    await send("Perfecto. ¿Qué *teléfono de contacto* dejamos? Puedes escribir *mismo* si quieres usar este número.");
+    await send(
+      nextPair(
+        "contrato:ask_phone",
+        "¿Qué *teléfono de contacto* dejamos?\nPuedes escribir *mismo* si quieres usar este número."
+      )
+    );
     return;
   }
 
@@ -271,10 +289,10 @@ async function handle({
     }
 
     await updateSession({ step: 4, data: { ...data, telefono_contacto: tel } });
-    await send(
-      "Gracias. Ahora envíame la foto de tu *INE por el frente*.\n\n" +
-        inePhotoTips("frente")
-    );
+    await send([
+      ...nextPair("contrato:ask_ine_front", "Ahora envíame la foto de tu *INE por el frente*."),
+      inePhotoTips("frente"),
+    ]);
     return;
   }
 
@@ -283,17 +301,20 @@ async function handle({
   // =====================
   if (step === 4) {
     if (!hasMediaUrls(inbound.media)) {
-      await send(
-        "Necesito la *foto del frente* de tu INE.\n\n" +
-          inePhotoTips("frente")
-      );
+      await send([
+        "Necesito la *foto del frente* de tu INE 😊",
+        inePhotoTips("frente"),
+      ]);
       return;
     }
 
     const m = pickInboundMedia(inbound.media);
 
     if (!m.url) {
-      await send("No pude leer la imagen. Reenvíamela como *foto*, por favor.\n\n" + inePhotoTips("frente"));
+      await send([
+        "No pude leer la imagen 😕 Reenvíamela como *foto*, por favor.",
+        inePhotoTips("frente"),
+      ]);
       return;
     }
 
@@ -305,8 +326,10 @@ async function handle({
         mimetype: m.mimetype,
       });
       await send(
-        "No pude procesar esa imagen. Reenvíala como *foto*, por favor.\n\n" +
-          inePhotoTips("frente")
+        [
+          "No pude procesar esa imagen 😕 Reenvíala como *foto*, por favor.",
+          inePhotoTips("frente"),
+        ]
       );
       return;
     }
@@ -325,8 +348,10 @@ async function handle({
     } catch (e) {
       logger.error("[CONTRATO][INE_FRENTE] storeToR2 failed", e?.message || e);
       await send(
-        "Tuve un problema guardando la imagen. Reenvíamela, por favor.\n\n" +
-          inePhotoTips("frente")
+        [
+          "Tuve un problema guardando la imagen 😕 Reenvíamela, por favor.",
+          inePhotoTips("frente"),
+        ]
       );
       return;
     }
@@ -343,10 +368,10 @@ async function handle({
       },
     });
 
-    await send(
-      "Gracias. Ahora envíame la foto de tu *INE por atrás*.\n\n" +
-        inePhotoTips("atrás")
-    );
+    await send([
+      ...nextPair("contrato:ask_ine_back", "Ahora envíame la foto de tu *INE por atrás*."),
+      inePhotoTips("atrás"),
+    ]);
     return;
   }
 
@@ -355,17 +380,20 @@ async function handle({
   // =====================
   if (step === 5) {
     if (!hasMediaUrls(inbound.media)) {
-      await send(
-        "Necesito la *foto por atrás* de tu INE.\n\n" +
-          inePhotoTips("atrás")
-      );
+      await send([
+        "Necesito la *foto por atrás* de tu INE 😊",
+        inePhotoTips("atrás"),
+      ]);
       return;
     }
 
     const m = pickInboundMedia(inbound.media);
 
     if (!m.url) {
-      await send("No pude leer la imagen. Reenvíamela como *foto*, por favor.\n\n" + inePhotoTips("atrás"));
+      await send([
+        "No pude leer la imagen 😕 Reenvíamela como *foto*, por favor.",
+        inePhotoTips("atrás"),
+      ]);
       return;
     }
 
@@ -376,8 +404,10 @@ async function handle({
         mimetype: m.mimetype,
       });
       await send(
-        "No pude procesar esa imagen. Reenvíala como *foto*, por favor.\n\n" +
-          inePhotoTips("atrás")
+        [
+          "No pude procesar esa imagen 😕 Reenvíala como *foto*, por favor.",
+          inePhotoTips("atrás"),
+        ]
       );
       return;
     }
@@ -390,9 +420,10 @@ async function handle({
 
     if (sameId || sameUrl) {
       await send(
-        "Me llegó la misma imagen que la del *frente*.\n" +
-          "Reenvíame la foto de la INE *por atrás*, por favor.\n\n" +
-          inePhotoTips("atrás")
+        [
+          "Me llegó la misma imagen que la del *frente* 😕",
+          "Reenvíame la foto de la INE *por atrás*, por favor.\n\n" + inePhotoTips("atrás"),
+        ]
       );
       return;
     }
@@ -411,8 +442,10 @@ async function handle({
     } catch (e) {
       logger.error("[CONTRATO][INE_REVERSO] storeToR2 failed", e?.message || e);
       await send(
-        "Tuve un problema guardando la imagen. Reenvíamela, por favor.\n\n" +
-          inePhotoTips("atrás")
+        [
+          "Tuve un problema guardando la imagen 😕 Reenvíamela, por favor.",
+          inePhotoTips("atrás"),
+        ]
       );
       return;
     }
@@ -452,16 +485,17 @@ async function handle({
     await closeSession(session.session_id);
 
     await send(
-      `Listo. Ya quedó registrada tu solicitud.\n` +
-        `Folio: *${c.folio}*\n\n` +
-        "En breve nos comunicaremos contigo para continuar con la instalación."
+      closePair(
+        `contrato:done:${c.folio}`,
+        `Ya quedó registrada tu solicitud.\nFolio: *${c.folio}*\n\nEn breve nos comunicaremos contigo para continuar con la instalación.`
+      )
     );
     return;
   }
 
   // fallback
   await closeSession(session.session_id);
-  await send("Listo. Si necesitas algo más, aquí estoy.");
+  await send(closePair("contrato:fallback", "Si necesitas algo más, aquí estoy 😊"));
 }
 
 module.exports = { intro, handle };
