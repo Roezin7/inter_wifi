@@ -297,7 +297,11 @@ function mapIntentFast(text) {
     return "CAMBIO_DOMICILIO";
   }
 
-  if (/(cambiar contrasena|cambiar contraseña|cambio de contrasena|cambio de contraseña|cambiar la clave|cambiar clave wifi|cambiar clave de wifi|cambiar password wifi)/i.test(t)) {
+  if (
+    /(me pueden cambiar|pueden cambiarme|quiero cambiar|quisiera cambiar|necesito cambiar|cambiar|cambio|resetear|restablecer).{0,30}(contrasena|contraseña|clave|password)/i.test(
+      t
+    )
+  ) {
     return "CAMBIO_CONTRASENA";
   }
 

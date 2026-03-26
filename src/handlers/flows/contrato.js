@@ -29,16 +29,16 @@ if (USE_TEMPLATES) {
 // =====================
 function intro() {
   if (templates && pick) return pick(templates.contrato_intro, "seed")();
-  return introPair("contrato", "Para empezar, compárteme tu *colonia*.");
+  return introPair("contrato", "Para empezar, compárteme tu *colonia o comunidad*.");
 }
 
 function askColonia() {
   if (templates && pick) return pick(templates.ask_colonia_more_detail, "seed")();
   return pickText(
     [
-      "Compárteme tu *colonia* para continuar 😊",
-      "Solo necesito tu *colonia* para seguir ✨",
-      "Pásame tu *colonia* y seguimos 😊",
+      "Compárteme tu *colonia o comunidad* para continuar 😊",
+      "Solo necesito tu *colonia o comunidad* para seguir ✨",
+      "Pásame tu *colonia o comunidad* y seguimos 😊",
     ],
     "contrato:ask_colonia"
   );
@@ -48,7 +48,7 @@ function confirmColonia(col) {
   if (templates && pick) return pick(templates.confirm_colonia, "seed")(col);
   return confirmPair(
     `contrato:confirm_colonia:${col}`,
-    `¿Te refieres a la colonia *${col}*?\nRespóndeme *sí* o *no*.`
+    `¿Te refieres a *${col}*?\nRespóndeme *sí* o *no*.`
   );
 }
 
@@ -63,9 +63,25 @@ function looksLikeContractIntent(text) {
   return /(contrat|quiero internet|nuevo servicio|instal|cobertura)/i.test(String(text || "").trim());
 }
 
+function cleanLocalityInput(text) {
+  let raw = String(text || "").trim();
+  if (!raw) return "";
+
+  raw = raw
+    .replace(/^[\s,.;:!-]+|[\s,.;:!-]+$/g, "")
+    .replace(/^(?:(?:si|sí|claro|ok|vale|va|listo|perfecto|correcto|pues)\b[\s,.;:-]*)+/i, "")
+    .replace(/^(yo\s+)?(estoy|ando|vivo|me encuentro|me ubico)\s+(en|por)\s+/i, "")
+    .replace(/^(mi\s+)?(colonia|comunidad|rancho|rancheria|ranchería)\s+(es|se llama)\s+/i, "")
+    .replace(/^(la\s+)?(colonia|comunidad|rancho|rancheria|ranchería)\s+/i, "")
+    .replace(/^(es|seria|sería)\s+/i, "")
+    .trim();
+
+  return raw.replace(/^[\s,.;:!-]+|[\s,.;:!-]+$/g, "").trim();
+}
+
 function pickColoniaInput(text, guess) {
-  const raw = String(text || "").trim();
-  if (guess) return String(guess).trim();
+  const raw = cleanLocalityInput(text);
+  if (guess) return cleanLocalityInput(guess);
 
   if (raw.includes(",")) {
     const first = raw.split(",")[0];
@@ -78,7 +94,7 @@ function pickColoniaInput(text, guess) {
 function buildManualColoniaCaptureMsg(colonia) {
   return nextPair(
     `contrato:manual_colonia:${colonia}`,
-    `Tomo la colonia como *${colonia}*.\nLa revisaremos al validar la solicitud.\n\nAhora compárteme tu *calle y número*.`
+    `Tomo la ubicación como *${colonia}*.\nLa revisaremos al validar la solicitud.\n\nAhora compárteme tu *calle y número*.`
   );
 }
 
@@ -112,7 +128,7 @@ async function handle({
   const txt = String(inbound.text || "").trim();
 
   // =====================
-  // STEP 1: SOLO COLONIA (sin mezclar con dirección)
+  // STEP 1: SOLO COLONIA O COMUNIDAD (sin mezclar con dirección)
   // =====================
   if (step === 1) {
     if (!hasMinLen(txt, 2)) {
@@ -121,7 +137,7 @@ async function handle({
     }
 
     if (looksLikeContractIntent(txt) && !/\d/.test(txt)) {
-      await send("Con gusto. Para revisar cobertura necesito que me compartas tu *colonia*.");
+      await send("Con gusto. Para revisar cobertura necesito que me compartas tu *colonia o comunidad*.");
       return;
     }
 
@@ -142,7 +158,7 @@ async function handle({
       const looksLikeAddress = /[,\d]/.test(txt);
 
       if (looksLikeAddress && !coloniaGuess) {
-        await send("Para ubicar bien la cobertura, primero necesito que me compartas solo la *colonia* 😊");
+        await send("Para ubicar bien la cobertura, primero necesito que me compartas solo la *colonia o comunidad* 😊");
         return;
       }
 
@@ -177,7 +193,7 @@ async function handle({
       await send(
         nextPair(
           `contrato:auto_colonia:${nextData.colonia}`,
-          `Colonia *${nextData.colonia}*.\nAhora compárteme tu *calle y número*.`
+          `Ubicación *${nextData.colonia}*.\nAhora compárteme tu *calle y número*.`
         )
       );
       return;
@@ -197,7 +213,7 @@ async function handle({
   }
 
   // =====================
-  // STEP 10: confirmar colonia (solo si hubo duda)
+  // STEP 10: confirmar colonia/comunidad (solo si hubo duda)
   // =====================
   if (step === 10) {
     if (looksLikeYes(txt)) {
@@ -211,19 +227,19 @@ async function handle({
       await send(
         nextPair(
           `contrato:confirmed_colonia:${colonia}`,
-          `Colonia *${colonia}*.\nAhora compárteme tu *calle y número*.`
+          `Ubicación *${colonia}*.\nAhora compárteme tu *calle y número*.`
         )
       );
       return;
     }
 
     if (looksLikeNo(txt)) {
-      // aquí sí regresamos a step 1 para que nos diga colonia correcta
+      // aquí sí regresamos a step 1 para que nos diga colonia/comunidad correcta
       await updateSession({
         step: 1,
         data: { ...data, colonia_guess: null, colonia_candidates: null },
       });
-      await send("De acuerdo 😊 Compárteme tu *colonia* para revisarla de nuevo.");
+      await send("De acuerdo 😊 Compárteme tu *colonia o comunidad* para revisarla de nuevo.");
       return;
     }
 
